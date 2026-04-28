@@ -47,10 +47,11 @@ module admin_mode(
     input [15:0] total_revenue,   // 总销售额
     
     // 给数据存储模块 (成员C) 的输出
-    output reg [7:0] update_data,  // 发送给存储模块的具体数值
-    output reg [2:0] drink_id,     // 发送给存储模块的地址（哪种饮料）
-    output reg write_en,           // 写使能脉冲，1个时钟周期
-    output reg [31:0] view_data,   // 发送给成员 C，对应 8 个数码管
+    output reg [1:0] update_type_out, // 发送给存储模块的模式
+    output reg [7:0] update_data,     // 发送给存储模块的具体数值
+    output reg [2:0] drink_id,        // 发送给存储模块的地址（哪种饮料）
+    output reg write_en,              // 写使能脉冲，1个时钟周期
+    output reg [31:0] view_data,      // 发送给成员 C，对应 8 个数码管
     
     // 给外设驱动的输出
     output reg alarm_trigger,   // 触发蜂鸣器报警
@@ -278,8 +279,9 @@ module admin_mode(
                 end
                         
                 S_SAVE: begin
-                    // 拉高写使能一个时钟周期，告诉 C 把 update_data 存到 drink_id 对应的寄存器里
+                    // 拉高写使能一个时钟周期，告诉 C 把 modify_mode 和 update_data 存到 drink_id 对应的寄存器里
                     write_en <= 1'b1; 
+                    update_type_out <= modify_mode;
                     modify_mode <= 2'b00; // 保存完成后立即清空修改模式
                 end
             endcase
