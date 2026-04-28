@@ -35,6 +35,10 @@ module admin_mode(
     input btn_next,             // 切换按键，用于切换饮料编号
     input btn_to_view,          // 进入查看模式按键
     input btn_to_modify,        // 进入修改模式按键
+    input btn_price,            // 改价格
+    input btn_stock,            // 改库存
+    input btn_shelf,            // 是否售罄
+    
     
     // 来自寄存器堆（成员C）的输入
     input [7:0] current_stock,    // 当前选中饮料的库存
@@ -43,26 +47,34 @@ module admin_mode(
     input [15:0] total_revenue,   // 总销售额
     
     // 给数据存储模块 (成员C) 的输出
-    output reg [7:0] update_data, // 发送给存储模块的具体数值
-    output reg [2:0] drink_id,   // 发送给存储模块的地址（哪种饮料）
-    output reg write_en,        // 写使能脉冲，1个时钟周期
-    output reg [31:0] view_data,  // 发送给成员 C，对应 8 个数码管
+    output reg [7:0] update_data,  // 发送给存储模块的具体数值
+    output reg [2:0] drink_id,     // 发送给存储模块的地址（哪种饮料）
+    output reg write_en,           // 写使能脉冲，1个时钟周期
+    output reg [31:0] view_data,   // 发送给成员 C，对应 8 个数码管
     
     // 给外设驱动的输出
     output reg alarm_trigger,   // 触发蜂鸣器报警
     output reg [3:0] error_code // 输出到数码管的错误码 (例如 4'hE 代表密码错)
 );
 
-    // 数据预处理
+    // 数据预处理——BCD 码
     // 使用 assign 定义组合逻辑，实时计算十进制位
-    wire [3:0] st_thou = (current_stock / 1000) % 10; 
     wire [3:0] st_hund = (current_stock / 100) % 10;  
     wire [3:0] st_ten  = (current_stock / 10) % 10;   
     wire [3:0] st_one  = current_stock % 10;          
 
     wire [3:0] pr_ten  = (current_price / 10) % 10;   
     wire [3:0] pr_one  = current_price % 10;
+    // 修改模式的新数据
+    wire [7:0] new_val = switch_in[7:0];
     
+    wire [3:0] st_hund_new = (new_val / 100) % 10;
+    wire [3:0] st_ten_new  = (new_val / 10) % 10;
+    wire [3:0] st_one_new  = new_val % 10;
+    
+    wire [3:0] pr_ten_new = (new_val / 10) % 10;
+    wire [3:0] pr_one_new = new_val % 10;
+
     // 状态机定义
     localparam S_IDLE     = 3'd0; // 闲置
     localparam S_AUTH     = 3'd1; // 密码校验
@@ -74,8 +86,10 @@ module admin_mode(
     
     reg [2:0] current_state, next_state;
     
-    reg [1:0] err_cnt;            // 密码错误计数器
+    reg [1:0] err_cnt;              // 密码错误计数器
     wire [7:0] CORRECT_PWD = 8'hA5; // 预设密码 10100101 (方便拨码开关测试)
+    
+    reg [1:0] modify_mode;  // 00: 初始, 01: 改价, 10: 补货，11： 状态切换
 
     // 第一段：状态转移时序逻辑
     always @(posedge clk or negedge rst_n) begin
@@ -152,15 +166,19 @@ module admin_mode(
             drink_id <= 3'd0;
             update_data <= 8'd0;
             write_en <= 1'b0;
+            modify_mode <= 2'b00;
         end else begin
-            // 默认值清零，防止误写
-            write_en <= 1'b0; 
+            write_en <= 1'b0; // 清零，防止误写
             
             case(current_state)
                 S_IDLE: begin
-                    err_cnt <= 2'd0; // 退出管理模式时清空错误次数
+                    err_cnt <= 2'd0;
                     alarm_trigger <= 1'b0;
                     error_code <= 4'h0;
+                    drink_id <= 3'd0;
+                    update_data <= 8'd0;
+                    write_en <= 1'b0;
+                    modify_mode <= 2'b00;
                 end
                 
                 S_AUTH: begin
@@ -177,11 +195,11 @@ module admin_mode(
                 
                 S_SELECT: begin
                     error_code <= 4'h0; // 清除错误码
-                    // 显示 "SEL- 01" (0代表View, 1代表Modify，提示用户选)
+                    // 显示 “SEL- 01”(0代表View, 1代表Modify，提示用户选)
                     view_data <= 32'h5E1_0001;
                 end
                 
-                 S_VIEW: begin
+                S_VIEW: begin
                     //选择饮料
                     if (btn_next) begin
                         if (drink_id == 3'd3) 
@@ -192,8 +210,8 @@ module admin_mode(
                     // 根据低4位开关的状态决定显示内容
                     casex(switch_in[3:0]) 
                         4'bxxx1: begin // 开关0：查看种类及库存
-                            // 显示格式: [ID] [F] [F] [千] [百] [十] [个]
-                            view_data <= {4'h0, drink_id, 8'hFF, st_thou, st_hund, st_ten, st_one};
+                            // 显示格式: [ID] [F] [F] [F] [百] [十] [个]
+                            view_data <= {4'h0, drink_id, 12'hFFF, st_hund, st_ten, st_one};
                         end
                 
                         4'bxx1x: begin // 开关1：查看单价
@@ -220,13 +238,49 @@ module admin_mode(
                 end
                 
                 S_MODIFY: begin
-                    // 读取此时拨码开关的值作为新价格/库存
-                    update_data <= switch_in;
+                    if (btn_next) begin
+                        if (drink_id == 3'd3) 
+                            drink_id <= 3'd0;
+                        else 
+                            drink_id <= drink_id + 1'b1;
+                    end
+                    
+                    if (btn_price)
+                        modify_mode <= 2'b01;
+                    else if (btn_stock)  
+                        modify_mode <= 2'b10;
+                    else if (btn_shelf)  
+                        modify_mode <= 2'b11;
+                    case(modify_mode)
+                        // 改价格
+                        2'b01: begin 
+                            update_data <= switch_in;
+                            view_data <= {4'h0, drink_id, 16'hFFFF, pr_ten_new, pr_one_new};
+                        end
+
+                        // 补货
+                        2'b10: begin 
+                            update_data <= switch_in; 
+                            view_data <= {4'h0, drink_id, 12'hFFF, st_hund_new, st_ten_new, st_one_new};
+                        end
+
+                        // 停售/恢复
+                        2'b11: begin 
+                            update_data <= 8'h01;   // 指令触发位
+                            if (sold_out_mask[drink_id])
+                                view_data <= {4'h0, drink_id, 16'hFFFF, 8'h0_8, 4'hF}; 
+                            else
+                                view_data <= {4'h0, drink_id, 16'hFFFF, 8'h0_FF, 4'hF};
+                        end
+
+                        default: view_data <= {4'h0, drink_id, 24'hFFFFFF};
+                    endcase
                 end
-                
+                        
                 S_SAVE: begin
                     // 拉高写使能一个时钟周期，告诉 C 把 update_data 存到 drink_id 对应的寄存器里
                     write_en <= 1'b1; 
+                    modify_mode <= 2'b00; // 保存完成后立即清空修改模式
                 end
             endcase
         end
