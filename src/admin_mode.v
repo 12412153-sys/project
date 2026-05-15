@@ -27,262 +27,196 @@
 module admin_mode(
     input clk,
     input rst_n,
-    input admin_en,             // 从主状态机来的使能信号：1表示当前在管理模式
+    input admin_en,             // SW[1]: 1则进入管理/密码模式
+    input sw_modify,            // SW[2]: 1则进入修改模式
     
-    // 交互输入
-    input [7:0] switch_in,      // 8个拨码开关:输入密码/输入新价格/输入库存增量
-    input btn_confirm,          // 确认按键
-    input btn_next,             // 切换按键，用于切换饮料编号
-    input btn_to_view,          // 进入查看模式按键
-    input btn_to_modify,        // 进入修改模式按键
-    input btn_price,            // 改价格
-    input btn_stock,            // 改库存
-    input btn_shelf,            // 是否售罄
+    // 键盘接口
+    input [3:0] kbd_data,       // 0-9 数字
+    input kbd_valid,            // 键盘按下脉冲
     
+    // 按键输入
+    input btn_confirm,          // 按键1: 确认/保存/报警返回
+    input btn_next_attr,        // 按键2: 右翻页
+    input btn_prev_attr,        // 按键3: 左翻页
+    input btn_id_inc,           // 按键4: 编号+1
+    input btn_id_dec,           // 按键5: 编号-1
     
-    // 来自寄存器堆（成员C）的输入
-    input [7:0] current_stock,    // 当前选中饮料的库存
-    input [7:0] current_price,    // 当前选中饮料的单价
-    input [3:0] sold_out_mask,    // 停售/售罄列表（每位代表一种饮料）
-    input [15:0] total_revenue,   // 总销售额
+    // 寄存器数据
+    input [7:0] current_stock,
+    input [7:0] current_price,
+    input [3:0] sold_out_mask,
+    input [15:0] total_revenue,
     
-    // 给数据存储模块 (成员C) 的输出
-    output reg [1:0] update_type_out, // 发送给存储模块的模式
-    output reg [7:0] update_data,     // 发送给存储模块的具体数值
-    output reg [2:0] drink_id,        // 发送给存储模块的地址（哪种饮料）
-    output reg write_en,              // 写使能脉冲，1个时钟周期
-    output reg [31:0] view_data,      // 发送给成员 C，对应 8 个数码管
-    
-    // 给外设驱动的输出
-    output reg alarm_trigger,   // 触发蜂鸣器报警
-    output reg [3:0] error_code // 输出到数码管的错误码 (例如 4'hE 代表密码错)
+    // 输出
+    output reg [31:0] view_data,
+    output reg write_en,
+    output reg [1:0]  update_type_out,
+    output reg [7:0]  update_data,
+    output reg [2:0]  drink_id,
+    output reg alarm_trigger,
+    output reg exit_to_main
 );
 
-    // 数据预处理——BCD 码
-    // 使用 assign 定义组合逻辑，实时计算十进制位
-    wire [3:0] st_hund = (current_stock / 100) % 10;  
-    wire [3:0] st_ten  = (current_stock / 10) % 10;   
-    wire [3:0] st_one  = current_stock % 10;          
+    // 状态定义
+    localparam S_IDLE   = 3'd0;
+    localparam S_AUTH   = 3'd1; // 密码校验
+    localparam S_VIEW   = 3'd2; // 查看模式
+    localparam S_MODIFY = 3'd3; // 修改模式
+    localparam S_SAVE   = 3'd4; // 触发写入
+    localparam S_ALARM  = 3'd5; // 报警锁定
 
-    wire [3:0] pr_ten  = (current_price / 10) % 10;   
-    wire [3:0] pr_one  = current_price % 10;
-    // 修改模式的新数据
-    wire [7:0] new_val = switch_in[7:0];
+    reg [2:0] state, next_state;
     
-    wire [3:0] st_hund_new = (new_val / 100) % 10;
-    wire [3:0] st_ten_new  = (new_val / 10) % 10;
-    wire [3:0] st_one_new  = new_val % 10;
-    
-    wire [3:0] pr_ten_new = (new_val / 10) % 10;
-    wire [3:0] pr_one_new = new_val % 10;
-
-    // 状态机定义
-    localparam S_IDLE     = 3'd0; // 闲置
-    localparam S_AUTH     = 3'd1; // 密码校验
-    localparam S_ALARM    = 3'd2; // 报警
-    localparam S_SELECT   = 3'd3; // 模式选择
-    localparam S_VIEW     = 3'd4; // 查看模式
-    localparam S_MODIFY   = 3'd5; // 修改模式
-    localparam S_SAVE     = 3'd6; // 保存数据
-    
-    reg [2:0] current_state, next_state;
-    
-    reg [1:0] err_cnt;              // 密码错误计数器
-    wire [7:0] CORRECT_PWD = 8'hA5; // 预设密码 10100101 (方便拨码开关测试)
-    
-    reg [1:0] modify_mode;  // 00: 初始, 01: 改价, 10: 补货，11： 状态切换
+    // 内部寄存器
+    reg [7:0] pwd_buffer;
+    reg [7:0] kbd_buffer;
+    reg [1:0] error_cnt;
+    reg [1:0] attr_sel;         // 0:库存, 1:单价, 2:状态
+    reg       show_total;       // 1则显示累计实收金额
 
     // 第一段：状态转移时序逻辑
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            current_state <= S_IDLE;  
-        end else begin
-            current_state <= next_state;
-        end
+        if (!rst_n) 
+            state <= S_IDLE;
+        else 
+            state <= next_state;
     end
 
     // 第二段：状态转移组合逻辑
     always @(*) begin
-        next_state = current_state; // 默认保持当前状态
-        
-        case(current_state)
+        next_state = state; // 默认维持当前状态
+        case (state)
             S_IDLE: begin
-                if (admin_en) 
-                    next_state = S_AUTH; // 开启管理模式，去验密码
+                if (admin_en) next_state = S_AUTH;
             end
             
             S_AUTH: begin
-                if (!admin_en) 
-                    next_state = S_IDLE; // 中途退出
-                else if (err_cnt >= 2'd3)
-                    next_state = S_ALARM; // 错3次，报警
+                if (!admin_en) next_state = S_IDLE;
                 else if (btn_confirm) begin
-                    if (switch_in == CORRECT_PWD)
-                        next_state = S_SELECT; // 密码正确，进入选择
+                    if (pwd_buffer == 8'hA5) next_state = S_VIEW;
+                    else if (error_cnt >= 2) next_state = S_ALARM;
+                    else next_state = S_AUTH; // 留在原地等待重试
                 end
             end
             
-            S_ALARM: begin
-                if (!admin_en) 
-                    next_state = S_IDLE; // 退出管理模式后解除报警
-            end
-            
-            S_SELECT: begin
-                if (!admin_en) 
-                    next_state = S_IDLE;
-                else if (btn_to_view) 
-                    next_state = S_VIEW;      // 进入查看
-                else if (btn_to_modify) 
-                    next_state = S_MODIFY;    // 进入修改
-            end
-            
             S_VIEW: begin
-                if (!admin_en) 
-                    next_state = S_IDLE;
-                else if (btn_confirm) 
-                    next_state = S_SELECT;
+                if (!admin_en) next_state = S_IDLE;
+                else if (sw_modify && !show_total) next_state = S_MODIFY;
             end
             
             S_MODIFY: begin
-                if (!admin_en) 
-                    next_state = S_IDLE;
-                else if (btn_confirm) 
-                    next_state = S_SAVE;
+                if (!sw_modify) next_state = S_VIEW;
+                else if (btn_confirm) next_state = S_SAVE;
             end
             
             S_SAVE: begin
-                next_state = S_SELECT; 
+                next_state = S_VIEW;
+            end
+            
+            S_ALARM: begin
+                if (btn_confirm) next_state = S_IDLE;
             end
             
             default: next_state = S_IDLE;
         endcase
     end
 
-    // 第三段：数据和控制信号输出 
+    // 第三段：数据计算与控制信号输出
+    // 键盘输入累加逻辑 (时序逻辑)
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin // 复位初始化所有输出
-            err_cnt <= 2'd0;
-            alarm_trigger <= 1'b0;
-            error_code <= 4'h0;
+        if (!rst_n) begin
+            pwd_buffer <= 8'h0;
+            kbd_buffer <= 8'h0;
+        end else if (kbd_valid) begin
+            if (state == S_AUTH) pwd_buffer <= {pwd_buffer[3:0], kbd_data};
+            else if (state == S_MODIFY) kbd_buffer <= {kbd_buffer[3:0], kbd_data};
+        end else if (state == S_IDLE || state == S_SAVE) begin
+            kbd_buffer <= 8'h0;
+            if (state == S_IDLE) pwd_buffer <= 8'h0;
+        end
+    end
+
+    // 导航、显示与控制逻辑 (时序逻辑)
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
             drink_id <= 3'd0;
-            update_data <= 8'd0;
+            attr_sel <= 2'd0;
+            show_total <= 1'b0;
+            error_cnt <= 2'd0;
+            alarm_trigger <= 1'b0;
             write_en <= 1'b0;
-            modify_mode <= 2'b00;
+            exit_to_main <= 1'b0;
+            update_type_out <= 2'b00;
+            update_data <= 8'h00;
         end else begin
-            write_en <= 1'b0; // 清零，防止误写
-            
-            case(current_state)
+            // 默认值消除锁存器
+            write_en <= 1'b0;
+            exit_to_main <= 1'b0;
+
+            case (state)
                 S_IDLE: begin
-                    err_cnt <= 2'd0;
                     alarm_trigger <= 1'b0;
-                    error_code <= 4'h0;
+                    show_total <= 1'b0;
+                    attr_sel <= 2'd0;
                     drink_id <= 3'd0;
-                    update_data <= 8'd0;
-                    write_en <= 1'b0;
-                    modify_mode <= 2'b00;
+                    error_cnt <= (next_state == S_AUTH) ? error_cnt : 2'd0; // 退出管理才清零错误
                 end
-                
+
                 S_AUTH: begin
-                    if (btn_confirm && switch_in != CORRECT_PWD) begin
-                        err_cnt <= err_cnt + 1'b1; // 计数错误次数
-                        error_code <= 4'hE; // 数码管显示 E (Error)
-                    end
+                    view_data <= {16'hFFFF, 4'hC, 4'h0, 4'hD, 4'hE};  // 显示 "CODE" 
+                    if (btn_confirm && pwd_buffer != 8'hA5) error_cnt <= error_cnt + 1;
                 end
-                
+
                 S_ALARM: begin
-                    alarm_trigger <= 1'b1; // 触发蜂鸣器
-                    error_code <= 4'hA;    // 数码管显示 A (Alarm)
+                    view_data <= 32'hAAAAAAAA; 
+                    alarm_trigger <= 1'b1;
+                    if (btn_confirm) exit_to_main <= 1'b1;
                 end
-                
-                S_SELECT: begin
-                    error_code <= 4'h0; // 清除错误码
-                    // 显示 “SEL- 01”(0代表View, 1代表Modify，提示用户选)
-                    view_data <= 32'h5E1_0001;
-                end
-                
+
                 S_VIEW: begin
-                    //选择饮料
-                    if (btn_next) begin
-                        if (drink_id == 3'd3) 
-                            drink_id <= 3'd0; 
-                        else 
-                            drink_id <= drink_id + 1'b1;
+                    // 右翻页逻辑
+                    if (btn_next_attr) begin
+                        if (!show_total) begin
+                            if (attr_sel < 2) attr_sel <= attr_sel + 1;
+                            else if (drink_id < 3) begin drink_id <= drink_id + 1; attr_sel <= 0; end
+                            else show_total <= 1'b1;
+                        end
                     end
-                    // 根据低4位开关的状态决定显示内容
-                    casex(switch_in[3:0]) 
-                        4'bxxx1: begin // 开关0：查看种类及库存
-                            // 显示格式: [ID] [F] [F] [F] [百] [十] [个]
-                            view_data <= {4'h0, drink_id, 12'hFFF, st_hund, st_ten, st_one};
-                        end
-                
-                        4'bxx1x: begin // 开关1：查看单价
-                            // 显示格式：[ID] [F] [F] [F] [F] [F] [十] [个] 
-                             view_data <= {4'h0, drink_id, 16'hFFFF, pr_ten, pr_one};
-                        end
-                
-                        4'bx1xx: begin // 开关2：查看累计总额
-                            // 显示格式：直接显示 8 位金额
-                            view_data <= total_revenue;
-                        end
-                
-                        4'b1xxx: begin // 开关3：查看停售列表
-                            // 显示格式：[O] [F] [F] [F] [F] [F] [F] [Mask]
-                            // 示例：OFF-1010(2、4售罄）
-                            view_data <= {12'h0FF, 4'hF, 12'h0, sold_out_mask[3], sold_out_mask[2], sold_out_mask[1], sold_out_mask[0]};
-                        end
-                
-                        default: begin
-                            // 如果没拨开关，显示 "READY" 或全灭
-                            view_data <= 32'h0EAD1_FFF; 
-                        end
-                    endcase
+                    // 左翻页逻辑
+                    if (btn_prev_attr) begin
+                        if (show_total) begin show_total <= 1'b0; drink_id <= 3; attr_sel <= 2; end
+                        else if (attr_sel > 0) attr_sel <= attr_sel - 1;
+                        else if (drink_id > 0) begin drink_id <= drink_id - 1; attr_sel <= 2; end
+                    end
+                    // ID 切换
+                    if (btn_id_inc && !show_total && drink_id < 3) drink_id <= drink_id + 1;
+                    if (btn_id_dec && !show_total && drink_id > 0) drink_id <= drink_id - 1;
+
+                    // 显示输出
+                    if (show_total) view_data <= {total_revenue, 16'hFFFF};
+                    else begin
+                        case (attr_sel)
+                            2'd0: view_data <= {4'h0, drink_id, 16'hFFFF, 4'hF, 3'b0, current_stock}; 
+                            2'd1: view_data <= {4'h0, drink_id, 16'hFFFF, 4'hF, 3'b0, current_price}; 
+                            2'd2: view_data <= {4'h0, drink_id, 20'hFFFFF, 3'b0, sold_out_mask[drink_id]}; 
+                        endcase
+                    end
                 end
-                
+
                 S_MODIFY: begin
-                    if (btn_next) begin
-                        if (drink_id == 3'd3) 
-                            drink_id <= 3'd0;
-                        else 
-                            drink_id <= drink_id + 1'b1;
+                    view_data <= {4'h0, drink_id, 16'hFFFF, kbd_buffer}; 
+                    if (btn_confirm) begin
+                        update_data <= kbd_buffer;
+                        case (attr_sel)
+                            2'd0: update_type_out <= 2'b10; // 补货
+                            2'd1: update_type_out <= 2'b01; // 改价
+                            2'd2: update_type_out <= 2'b11; // 停售切换
+                        endcase
                     end
-                    
-                    if (btn_price)
-                        modify_mode <= 2'b01;
-                    else if (btn_stock)  
-                        modify_mode <= 2'b10;
-                    else if (btn_shelf)  
-                        modify_mode <= 2'b11;
-                    case(modify_mode)
-                        // 改价格
-                        2'b01: begin 
-                            update_data <= switch_in;
-                            view_data <= {4'h0, drink_id, 16'hFFFF, pr_ten_new, pr_one_new};
-                        end
-
-                        // 补货
-                        2'b10: begin 
-                            update_data <= switch_in; 
-                            view_data <= {4'h0, drink_id, 12'hFFF, st_hund_new, st_ten_new, st_one_new};
-                        end
-
-                        // 停售/恢复
-                        2'b11: begin 
-                            update_data <= 8'h01;   // 指令触发位
-                            if (sold_out_mask[drink_id])
-                                view_data <= {4'h0, drink_id, 16'hFFFF, 8'h0_8, 4'hF}; 
-                            else
-                                view_data <= {4'h0, drink_id, 16'hFFFF, 8'h0_FF, 4'hF};
-                        end
-
-                        default: view_data <= {4'h0, drink_id, 24'hFFFFFF};
-                    endcase
                 end
-                        
+
                 S_SAVE: begin
-                    // 拉高写使能一个时钟周期，告诉 C 把 modify_mode 和 update_data 存到 drink_id 对应的寄存器里
-                    write_en <= 1'b1; 
-                    update_type_out <= modify_mode;
-                    modify_mode <= 2'b00; // 保存完成后立即清空修改模式
+                    write_en <= 1'b1;
                 end
             endcase
         end
