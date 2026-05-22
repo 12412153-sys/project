@@ -20,16 +20,14 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 // 模块名称: admin_mode
-// 描述: 售货机管理模式控制，包含8-bit密码校验（Bonus）、连续错误报警、数据修改指令下发。
-// 注意: 所有的 btn 输入默认已经被消抖并且提取了单脉冲（上升沿有效）。
-// 目前为4种饮料
+// 描述: 售货机管理模式控制，包含8-bit密码校验、连续错误报警、数据修改指令下发。
+// 增强功能：支持 COLA/SODA/TEA/H2O 英文缩写对齐显示。
 
 module admin_mode(
     input clk,
     input rst_n,
     input admin_en,             // SW[1]: 1则进入管理/密码模式
     input sw_modify,            // SW[2]: 1则进入修改模式
-    input [7:0] password_in,    // ── 接口更改：引入外部动态密码输入 ──
     
     // 键盘接口
     input [3:0] kbd_data,       // 0-9 数字
@@ -74,6 +72,30 @@ module admin_mode(
     reg [1:0] attr_sel;         // 0:库存, 1:单价, 2:状态
     reg       show_total;       // 1则显示累计实收金额
 
+    // ─── 新增：库存与单价的十进制 BCD 拆解 ───
+    wire [3:0] stock_tens = (current_stock / 10) % 10;
+    wire [3:0] stock_ones = current_stock % 10;
+    wire [3:0] price_tens = (current_price / 10) % 10;
+    wire [3:0] price_ones = current_price % 10;
+
+    // ─── 新增：键盘输入修改值的十进制拆解 ───
+    wire [3:0] kbd_tens  = (kbd_buffer / 10) % 10;
+    wire [3:0] kbd_ones  = kbd_buffer % 10;
+
+    // ─── 新增：饮料缩写及字宽控制逻辑 ───
+    reg [15:0] name_code; // 存储缩写的 4 个 Nibble
+    reg        name_len;  // 0: 3位长 (TEA, H2O); 1: 4位长 (COLA, SODA)
+    
+    always @(*) begin
+        case(drink_id)
+            3'd0: begin name_code = {4'hC, 4'h0, 4'hD, 4'hA}; name_len = 1'b1; end // COLA (C0dA)
+            3'd1: begin name_code = {4'h5, 4'h0, 4'hD, 4'hA}; name_len = 1'b1; end // SODA (50dA)
+            3'd2: begin name_code = {4'h7, 4'hE, 4'hA, 4'hF}; name_len = 1'b0; end // TEA  (tEA_)
+            3'd3: begin name_code = {4'hB, 4'h2, 4'h0, 4'hF}; name_len = 1'b0; end // H2O  (b20_)
+            default: begin name_code = 16'hFFFF; name_len = 1'b0; end
+        endcase
+    end
+
     // ============================================================
     // 第一段：状态转移时序逻辑
     // ============================================================
@@ -88,7 +110,7 @@ module admin_mode(
     // 第二段：状态转移组合逻辑
     // ============================================================
     always @(*) begin
-        next_state = state; // 默认维持当前状态
+        next_state = state;
         case (state)
             S_IDLE: begin
                 if (admin_en) next_state = S_AUTH;
@@ -97,10 +119,9 @@ module admin_mode(
             S_AUTH: begin
                 if (!admin_en) next_state = S_IDLE;
                 else if (btn_confirm) begin
-                    // ── 逻辑更改：使用 password_in 代替硬编码 ──
-                    if (pwd_buffer == password_in) next_state = S_VIEW;
+                    if (pwd_buffer == 8'hA5) next_state = S_VIEW;
                     else if (error_cnt >= 2'd2) next_state = S_ALARM;
-                    else next_state = S_AUTH; // 留在原地等待重试
+                    else next_state = S_AUTH;
                 end
             end
             
@@ -137,6 +158,7 @@ module admin_mode(
             kbd_buffer <= 8'h0;
         end else if (kbd_valid) begin
             if (state == S_AUTH) pwd_buffer <= {pwd_buffer[3:0], kbd_data};
+            // 键盘按键逻辑：支持修改输入的即时移位更新
             else if (state == S_MODIFY) kbd_buffer <= {kbd_buffer[3:0], kbd_data};
         end else if (state == S_IDLE || state == S_SAVE) begin
             kbd_buffer <= 8'h0;
@@ -157,7 +179,6 @@ module admin_mode(
             update_type_out <= 2'b00;
             update_data <= 8'h00;
         end else begin
-            // 默认值消除锁存器
             write_en <= 1'b0;
             exit_to_main <= 1'b0;
 
@@ -167,13 +188,12 @@ module admin_mode(
                     show_total <= 1'b0;
                     attr_sel <= 2'd0;
                     drink_id <= 3'd0;
-                    error_cnt <= (next_state == S_AUTH) ? error_cnt : 2'd0; // 退出管理才清零错误
+                    error_cnt <= (next_state == S_AUTH) ? error_cnt : 2'd0;
                 end
 
                 S_AUTH: begin
-                    view_data <= {16'hFFFF, 4'hC, 4'h0, 4'hD, 4'hE}; // 显示 "CODE" 
-                    // ── 逻辑更改：密码错误计数对比对象变更为 password_in ──
-                    if (btn_confirm && pwd_buffer != password_in) error_cnt <= error_cnt + 1;
+                    view_data <= {16'hFFFF, 4'hC, 4'h0, 4'hD, 4'hE}; // 显示 "CODE"
+                    if (btn_confirm && pwd_buffer != 8'hA5) error_cnt <= error_cnt + 1;
                 end
 
                 S_ALARM: begin
@@ -183,7 +203,7 @@ module admin_mode(
                 end
 
                 S_VIEW: begin
-                    // 右翻页逻辑
+                    // 右翻页
                     if (btn_next_attr) begin
                         if (!show_total) begin
                             if (attr_sel < 2) attr_sel <= attr_sel + 1;
@@ -191,44 +211,65 @@ module admin_mode(
                             else show_total <= 1'b1;
                         end
                     end
-                    
-                    // 左翻页逻辑（已添加边界锁定）
+                    // 左翻页（含卡死在边界防止溢出逻辑）
                     if (btn_prev_attr) begin
                         if (show_total) begin 
-                            show_total <= 1'b0;
-                            drink_id <= 3; 
-                            attr_sel <= 2; 
+                            show_total <= 1'b0; drink_id <= 3; attr_sel <= 2; 
                         end
-                        // 当在第0个饮料的第0个属性时，按下按键3不执行任何动作
                         else if (drink_id == 3'd0 && attr_sel == 2'd0) begin
-                            // 保持不变
+                            // 在第一项的第一种属性时，按下左翻页直接保持原样（不产生下溢出）
                         end
                         else if (attr_sel > 0) 
                             attr_sel <= attr_sel - 1;
                         else if (drink_id > 0) begin 
-                            drink_id <= drink_id - 1; 
-                            attr_sel <= 2; 
+                            drink_id <= drink_id - 1; attr_sel <= 2; 
                         end
                     end
                     
-                    // ID 切换逻辑
+                    // ID 快捷切换
                     if (btn_id_inc && !show_total && drink_id < 3) drink_id <= drink_id + 1;
                     if (btn_id_dec && !show_total && drink_id > 0) drink_id <= drink_id - 1;
 
-                    // 显示输出
-                    if (show_total) view_data <= {total_revenue, 16'hFFFF};
-                    else begin
+                    // ─── 核心修改：动态自适应生成 view_data 显示内容 ───
+                    if (show_total) begin
+                        view_data <= {total_revenue, 16'hFFFF};
+                    end else begin
                         case (attr_sel)
-                            2'd0: view_data <= {4'h0, drink_id, 16'hFFFF, 4'hF, 3'b0, current_stock}; 
-                            2'd1: view_data <= {4'h0, drink_id, 16'hFFFF, 4'hF, 3'b0, current_price}; 
-                            2'd2: view_data <= {4'h0, drink_id, 20'hFFFFF, 3'b0, sold_out_mask[drink_id]}; 
+                            // 1. 库存显示 (十进制)
+                            2'd0: begin
+                                if (name_len) // 4位长名字: [N3][N2][N1][N0] [F][F] [十位][个位]
+                                    view_data <= {name_code, 8'hFF, stock_tens, stock_ones};
+                                else          // 3位长名字: [N3][N2][N1] [F][F][F] [十位][个位]
+                                    view_data <= {name_code[15:4], 12'hFFF, stock_tens, stock_ones};
+                            end
+                            
+                            // 2. 单价显示 (十进制)
+                            2'd1: begin
+                                if (name_len)
+                                    view_data <= {name_code, 8'hFF, price_tens, price_ones};
+                                else
+                                    view_data <= {name_code[15:4], 12'hFFF, price_tens, price_ones};
+                            end
+                            
+                            // 3. 停售状态显示 (最后一位显示 0 或 1，倒数第二位全灭)
+                            2'd2: begin
+                                if (name_len) // 4位长名字: [N3][N2][N1][N0] [F][F][F] [0/1]
+                                    view_data <= {name_code, 12'hFFF, 3'b0, sold_out_mask[drink_id]};
+                                else          // 3位长名字: [N3][N2][N1] [F][F][F][F] [0/1]
+                                    view_data <= {name_code[15:4], 16'hFFFF, 3'b0, sold_out_mask[drink_id]};
+                            end
+                            default: view_data <= 32'hFFFFFFFF;
                         endcase
                     end
                 end
 
                 S_MODIFY: begin
-                    // ── 显示对齐更改：修改界面的显示对齐校准 ──
-                    view_data <= {4'h0, {1'b0, drink_id}, 4'hF, 4'hF, 4'hF, 4'hF, kbd_buffer}; 
+                    // 修改动态界面：左侧依旧显示对应商品的名字缩写
+                    if (name_len)
+                        view_data <= {name_code, 8'hFF, kbd_tens, kbd_ones};
+                    else
+                        view_data <= {name_code[15:4], 12'hFFF, kbd_tens, kbd_ones};
+
                     if (btn_confirm) begin
                         update_data <= kbd_buffer;
                         case (attr_sel)
