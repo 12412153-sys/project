@@ -2,40 +2,40 @@
 
 ## 1. 项目总览
 
-本系统是一个基于 FPGA 的饮料售货机，支持**销售**与**管理**两种工作模式，通过 EGO1 板载外设完成全部人机交互。系统覆盖项目要求的所有基础功能（80 分），并实现全部 Bonus（密码校验+报警、蜂鸣器多音效、PS/2 键盘输入、VGA 输出、滚动 UI、操作音、进度条/变频流水灯等）。
+本系统是一个基于 FPGA 的饮料售货机，支持**销售**与**管理**两种工作模式，通过 EGO1 板载外设完成人机交互。
 
-### 1.1 设计哲学
+目前支持
+- 4种饮料: COLA、SODA、TEA、H2O（缩写）
+- 库存个位数
+- 整数价格 + <10
+- 上电后开始累计营收额（初始化为0）且累计营收额只有S_SALES mode可以修改
+- 密码8 bit（bcd code，所以键盘输入两位数字，如果输入多位但是最后两位是密码也可以通过）
+- 一次售卖一个
 
-- **三层架构**：硬件驱动层（HAL）—— 中枢调度层 —— 业务逻辑层（销售/管理）。
-- **共享寄存器堆**：饮料数据（名称/价格/库存/状态）存放在中央寄存器堆，销售模块只读+扣库存，管理模块可读写，顶层做仲裁。
-- **统一事件总线**：所有输入（按键/拨码/PS2 键盘）归一化为 `(ev_pulse, ev_code)`，下游模块只看事件编码，不关心物理来源。
-- **统一显示总线**：业务模块输出语义数据，`display_mux` 按模式组装后送给 `seg7_driver`。
+两种模式数码管的显示demo
+- admin 00FFF04: 编号00的饮料某个属性的值是04  
+- sale COLA04S5: cola这种饮料04¥，stock 5
 
-### 1.2 全局状态机
+后续优化
+- 目前管理模式支持键盘输入，销售模式不支持键盘输入（需修改销售模式内部模块--统一调用ps2得到的信号）
+### 1.1 全局状态机
 
+顶层 FSM 有三个状态，通过 `sys_state[1:0]` 寄存器维护：
+
+| 状态 | 编码 | 描述 |
+|------|------|------|
+| `MAIN_MENU` | `2'd0` | 数码管显示 "r1-0S-1A"；SW[0]=0 选销售，SW[0]=1 选管理；S2 确认进入 |
+| `SALE_MODE` | `2'd1` | 使能 `sales_mode`，数码管/LED 由销售模块驱动 |
+| `ADMIN_MODE` | `2'd2` | 使能 `admin_mode`，数码管由管理模块驱动 |
+
+状态转换：
 ```
-        ┌──────────────────────┐
-        │   S_MAIN_MENU (主菜单)│  ← 上电默认，数码管滚动 HELLO
-        └──────────────────────┘
-               │           │
-        SW[0]=0+确认   SW[0]=1+确认
-               ▼           ▼
-    ┌──────────────┐  ┌────────────────┐
-    │ S_SALES(销售) │  │ S_PWD(密码验证) │
-    └──────────────┘  └────────────────┘
-               │           │ 密码正确
-               │           ▼
-               │    ┌────────────────┐
-               │    │ S_ADMIN(管理)  │
-               │    └────────────────┘
-               │           │ 连续错 3 次
-               │           ▼
-               │    ┌────────────────┐
-               │    │ S_ALARM(报警)  │  LED全闪 + 蜂鸣器持续
-               │    └────────────────┘
-               ▼           ▼
-           任意状态按 BTN[1] 返回主菜单（报警态需长按 2s）
+MAIN_MENU --(S2, SW[0]=0)--> SALE_MODE  --(exit_to_main)--> MAIN_MENU
+MAIN_MENU --(S2, SW[0]=1)--> ADMIN_MODE --(exit_to_main)--> MAIN_MENU
 ```
+
+`sales_mode.exit_to_main` 在销售主页按 S3(cancel) 时拉高一周期。  
+`admin_mode.exit_to_main` 在两种情况下拉高：(1) 在 S_VIEW 最开头位置按 S3(prev) 正常退出；(2) S_ALARM 状态按 S2 解除报警时退出。
 
 ---
 
@@ -45,443 +45,119 @@
 
 | 物理外设 | 顶层端口 | 说明 |
 |----------|----------|------|
-| 100 MHz 时钟 (P17) | `CLK100MHZ` | 系统时钟 |
-| 复位按键 S6 (P15) | `CPU_RESETN` | 低有效全局复位 |
-| 按键 S0 (R11) | `BTN[0]` | 确认 / 取货 |
-| 按键 S1 (R17) | `BTN[1]` | 返回主菜单 / 上翻 |
-| 按键 S2 (R15) | `BTN[2]` | 取消 / 下翻 |
-| 按键 S3 (V1)  | `BTN[3]` | 左 / 功能− |
-| 按键 S4 (U4)  | `BTN[4]` | 右 / 功能+ |
-| 拨码开关 SW0~SW7 (R1~P5) | `SW[7:0]` | 数值输入（金额/价格/密码） |
-| DIP 开关 SW8[0~7] (T5~U3) | `SW[15:8]` | 功能选择（模式/饮料号/管理子功能） |
-| PS2_CLK (K5) | `PS2_CLK` | PS/2 键盘（Bonus） |
-| PS2_DATA (L4) | `PS2_DATA` | PS/2 键盘（Bonus） |
+| 100 MHz 时钟 (P17) | `clk` | 系统时钟 | 
+| 复位按键 S6 (P15) | `rst_n` | 低有效全局复位 |                                 
+| 按键 S2 (R15) | `btn[2]` | 确认/保存/报警解除返回 |
+| 按键 S0 (R11) | `btn[0]` | 属性向后翻页（admin）/ 加金额（sale） |
+| 按键 S3 (V1)  | `btn[3]` | 属性向前翻页/退出（admin）/ 取消订单（sale） |
+| 按键 S4 (U4)  | `btn[4]` | 饮料ID+（admin）/ 上一个饮料（sale） |
+| 按键 S1 (R17) | `btn[1]` | 饮料ID-（admin）/ 下一个饮料（sale） |
+| PS2_CLK (K5) | `ps2_clk` | PS/2 键盘（Bonus） |
+| PS2_DATA (L4) | `ps2_data` | PS/2 键盘（Bonus） |
+| 拨码开关 SW0~SW7 (R1~P5) | `sw[7:0]` | - |
 
-**开关功能约定：**
+**拨码开关用途**
 
-| 开关位 | 主菜单 | 销售模式 | 管理模式/密码 |
-|--------|--------|----------|--------------|
-| SW[0] | 模式选（0=销售,1=管理） | — | — |
-| SW[3:1] | — | 饮料编号 0~7 | 饮料编号 0~7 |
-| SW[7:0] | — | 金额输入（角） | 密码输入（8 bit） |
-| SW[11:8] | — | — | 价格/库存增量 |
-| SW[14:12] | — | — | 管理子功能（见 §4.7） |
+| 开关位 | 主菜单 | 销售模式 | 管理模式 |
+|--------|--------|----------|---------|
+| SW[0] (R1) | 模式选（0=销售,1=管理） | — | — |
+| SW[1] (N4) | — | — | 修改开关（1=进入编辑子态） |
+| SW[7:0] | — | 金额输入（PAY 状态） | — |
 
 ### 2.2 输出
 
 | 物理外设 | 顶层端口 | 说明 |
 |----------|----------|------|
-| LED D1 组 8个 (K3~K1) | `LED[7:0]` | 进度条/流水灯/状态 |
-| LED D2 组 8个 (K2~F6) | `LED[15:8]` | 进度条/流水灯/状态 |
-| 数码管 DN0 段线 (B4~B2) | `SEG0[6:0]` | 右侧4位段驱动，**高有效** |
-| 数码管 DN1 段线 (D4~D2) | `SEG1[6:0]` | 左侧4位段驱动，**高有效** |
-| 小数点 DP0(D5), DP1(H2) | `DP0`, `DP1` | 各组小数点 |
-| 位选 BIT1~BIT8 | `AN[7:0]` | 8位位选，**高有效**，AN[0]=最右位 |
-| 音频 PWM (T1) | `AUD_PWM` | 蜂鸣器，标准推挽输出 0/1 |
-| 音频 SD# (M6) | `AUD_SD` | 音频使能，常输出 1 |
-| VGA R[3:0] (F5~B7) | `VGA_R` | VGA 红色 4bit（Bonus） |
-| VGA G[3:0] (B6~D8) | `VGA_G` | VGA 绿色 4bit（Bonus） |
-| VGA B[3:0] (C7~E7) | `VGA_B` | VGA 蓝色 4bit（Bonus） |
-| HSYNC (D7), VSYNC (C4) | `VGA_HS`, `VGA_VS` | VGA 同步（Bonus） |
+| 数码管 DN0 段线 (B4,A4,A3,B1,A1,B3,B2,D5) | `seg0[7:0]` | 右侧4位 {dp,g,f,e,d,c,b,a}，**高有效** |
+| 数码管 DN1 段线 (D4,E3,D3,F4,F3,E2,D2,H2) | `seg1[7:0]` | 左侧4位 {dp,g,f,e,d,c,b,a}，**高有效** |
+| 位选 BIT1~BIT8 (G2,C2,C1,H1,G1,F1,E1,G6) | `an[7:0]` | 8位位选，**高有效**，an[0]=最右位 |
+| 音频 PWM (T1) | `aud_pwm` | 蜂鸣器方波输出 |
+| 音频 SD# (M6) | `aud_sd` | 音频使能，常输出 1 |
+| LED D1 组 (K3,M1,L1,K6,J5,H5,H6,K1) | `led[7:0]` | 进度条/流水灯/状态 |
+| LED D2 组 (K2,J2,J3,H4,J4,G3,G4,F6) | `led[15:8]` | 进度条/流水灯/状态 |
 
-**数码管关键特性：**
-- EGO1 数码管为**共阴极**：段选高电平=点亮，位选高电平=选中该位。
-- DN0（右4位）和 DN1（左4位）各有独立段线引脚，`seg7_driver` 扫描到哪组就驱动哪组，另一组段线输出全 0。
-- `AN[0]`=最右位（DN0_K1/BIT1），`AN[7]`=最左位（DN1_K4/BIT8）。
+**（VGA 接口引脚已在 XDC 中注释备用，启用 Bonus 时取消注释即可）**
 
 ---
 
 ## 3. 模块层级总览
 
 ```
-drink_vending_top              [C] 顶层，完成所有 wire 连接
-├── clk_rst_gen                [C]
-├── debouncer × 5              [C] BTN[4:0] 各一份
-├── sw_sync                    [C]
-├── ps2_keyboard               [C] (Bonus)
-├── event_arbiter              [C]
-├── mode_controller            [C]
-├── reg_file                   [C]
-├── sales_module               [B] ← B 实现此模块
-├── admin_module               [A] ← A 实现此模块
-├── password_unit              [A] ← A 实现此模块
-├── display_mux                [C]
-├── seg7_driver                [C]
-├── led_driver                 [C]
-├── buzzer_driver              [C] (Bonus)
-└── vga_driver                 [C] (Bonus)
+drink_vending_top
+├── btn_debounce   × 5   (消抖，每个按键一个实例)
+├── ps2_keyboard         (PS/2 → BCD digit + valid)
+├── register_file        (中央存储，位于 project_sub/)
+├── admin_mode           (管理模式 FSM，位于 project_admin/)
+├── sales_mode           (销售模式 FSM，位于 project_sale/)
+├── seg7_mux             (8 位数码管时分复用驱动)
+└── buzzer_driver        (蜂鸣器报警音生成)
 ```
-
-| 负责人 | 文件 |
-|--------|------|
-| C | `drink_vending_top.v`, `clk_rst_gen.v`, `debouncer.v`, `sw_sync.v`, `ps2_keyboard.v`, `event_arbiter.v`, `mode_controller.v`, `reg_file.v`, `display_mux.v`, `seg7_driver.v`, `led_driver.v`, `buzzer_driver.v`, `vga_driver.v`, `vending_ego1.xdc` |
-| B | `sales_module.v` |
-| A | `admin_module.v`, `password_unit.v` |
 
 ---
 
 ## 4. 子模块详细说明
 
-### 4.1 `clk_rst_gen` [C]
+### 4.1 `btn_debounce.v`
 
-```verilog
-module clk_rst_gen (
-    input  wire clk_in,      // P17, 100 MHz
-    input  wire rst_btn_n,   // P15, 低有效
-    output wire clk_sys,     // 100 MHz 系统时钟（直通）
-    output wire rst_sync     // 同步复位，高有效
-);
-```
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CNT_MAX` | 2,000,000 | 消抖时间 20ms（100MHz） |
+| `CNT_WIDTH` | 25 | 计数器位宽 |
 
-### 4.2 `debouncer` [C]
+输出 `btn_out` 为**高有效单周期脉冲**：仅在按键持续按下 20ms 时输出一次高电平。已消除抖动，顶层直接使用。
 
-```verilog
-module debouncer #(parameter CNT_MAX = 2_000_000) // 20 ms @ 100 MHz
-(
-    input  wire clk, rst,
-    input  wire btn_in,      // 按下=1
-    output reg  btn_level,   // 消抖后电平
-    output reg  btn_pulse    // 按下瞬间单周期脉冲
-);
-```
+### 4.2 `ps2_keyboard.v`
 
-### 4.3 `sw_sync` [C]
+- 接收 PS/2 11-bit 帧（start + 8 data + parity + stop），数据 LSB 先至。
+- 支持 break 码（0xF0 前缀）过滤：仅 make 码触发输出。
+- 输出 `kbd_data[3:0]`（BCD 0-9）和 `kbd_valid`（1 周期脉冲）。
+- 数字键扫描码（Set 2）：0=0x45，1=0x16，2=0x1E，3=0x26，4=0x25，5=0x2E，6=0x36，7=0x3D，8=0x3E，9=0x46。
 
-```verilog
-module sw_sync (
-    input  wire        clk,
-    input  wire [15:0] sw_in,   // SW[7:0]=拨码, SW[15:8]=DIP
-    output reg  [15:0] sw_out   // 两级FF同步后
-);
-```
+### 4.3 `seg7_mux.v`
 
-### 4.4 `ps2_keyboard` [C] (Bonus)
+- 输入：`disp_data[39:0]` = 8 × 5-bit 字符 ID，打包格式 `{id7, id6, ..., id0}`（id7=最左位）。
+- 字符 ID 与 `sales_mode.v` 中 `CH_*` localparams 一致（0-9=数字，10=A，11=b，...，23=blank，24=-）。
+- 扫描频率：100MHz / (100MHz/800Hz) = 100Hz/digit，视觉稳定无闪烁。
+- 输出 `an[7:0]`（高有效位选）、`seg0/seg1[7:0]`（高有效段码 `{dp,g,f,e,d,c,b,a}`）。
+- 位选 0-3 对应 DN0（右组，驱动 seg0），位选 4-7 对应 DN1（左组，驱动 seg1）。
 
-```verilog
-module ps2_keyboard (
-    input  wire       clk, rst,
-    input  wire       ps2_clk,   // K5
-    input  wire       ps2_data,  // L4
-    output reg  [7:0] scancode,
-    output reg        key_valid,    // 收到完整扫描码的单周期脉冲
-    output reg        key_release   // 是否为 break code（F0 前缀）
-);
-```
+**Admin view_data 转换**（在顶层进行）：  
+`admin_mode` 输出 32-bit（8 nibble）display，顶层用 `nib2id()` 函数将每个 nibble 转换为 5-bit 字符 ID：nibble 0x0-0xE → char ID 0-14，nibble 0xF → char ID 23（blank）。
 
-### 4.5 `event_arbiter` [C]
+### 4.4 `buzzer_driver.v`
 
-```verilog
-module event_arbiter (
-    input  wire        clk, rst,
-    input  wire        btn0_p, btn1_p, btn2_p, btn3_p, btn4_p,
-    input  wire [15:0] sw,
-    input  wire        kbd_valid,
-    input  wire [7:0]  kbd_code,
-    input  wire        kbd_release,
-    output reg         ev_pulse,     // 有效操作的单周期脉冲
-    output reg  [3:0]  ev_code,      // 事件编码
-    output reg         buzzer_click  // 操作音触发
-);
-```
+- `alarm_trigger=1` 时生成双音交替报警音（880Hz / 440Hz，250ms 切换）。
+- `aud_sd` 常高（使能板上音频放大器）。
+- `alarm_trigger=0` 时 PWM 输出为低（静音）。
+---
 
-**`ev_code` 编码：**
-`0=CONFIRM`(BTN0/Enter), `1=UP`(BTN1/Esc), `2=DOWN`(BTN2/BS),
-`3=LEFT`(BTN3/←), `4=RIGHT`(BTN4/→), `5~14=NUM0~9`(键盘数字), `15=NONE`
+## 5. 顶层按键路由汇总
 
-### 4.6 `mode_controller` [C]
-
-```verilog
-module mode_controller (
-    input  wire        clk, rst,
-    input  wire        ev_pulse,
-    input  wire [3:0]  ev_code,
-    input  wire [15:0] sw,
-    input  wire        sales_exit_req,
-    input  wire        admin_exit_req,
-    input  wire        pwd_ok,
-    input  wire        pwd_fail3,
-    output reg         mode_main, mode_sales, mode_pwd, mode_admin, mode_alarm,
-    output reg         scroll_enable
-);
-```
-
-### 4.7 `reg_file` [C]
-
-8 种饮料（编号 0~7），每种有 name_id(4b) / price(8b) / stock(4b) / enabled(1b)，外加 total_revenue(16b)。
-
-```verilog
-module reg_file #(parameter N = 8) (
-    input  wire        clk, rst,
-    input  wire [2:0]  rd_idx,
-    output wire [3:0]  rd_name_id,
-    output wire [7:0]  rd_price,
-    output wire [3:0]  rd_stock,
-    output wire        rd_enabled,
-    output wire [15:0] rd_total_revenue,
-    // 销售写
-    input  wire        sale_we,
-    input  wire [2:0]  sale_idx,
-    input  wire [7:0]  sale_amount,
-    input  wire        refund_we,
-    input  wire [2:0]  refund_idx,
-    input  wire [7:0]  refund_amount,
-    // 管理写
-    input  wire        admin_we_price,
-    input  wire [2:0]  admin_price_idx,
-    input  wire [7:0]  admin_price_val,
-    input  wire        admin_we_restock,
-    input  wire [2:0]  admin_restock_idx,
-    input  wire [3:0]  admin_restock_amt,
-    input  wire        admin_we_toggle,
-    input  wire [2:0]  admin_toggle_idx
-);
-```
-
-上电初始值：COLA/30/5，SPRT/30/5，ORNG/35/4，MILK/40/3，BEER/50/2，H2O/20/8，TEA/25/6，CFEE/60/0。
-sales 写优先于 admin 写。
-
-### 4.8 `sales_module` [B] — 接口已冻结，B 实现内部 FSM
-
-```verilog
-module sales_module (
-    input  wire        clk, rst,
-    input  wire        enable,         // = mode_sales
-    input  wire        ev_pulse,
-    input  wire [3:0]  ev_code,
-    input  wire [15:0] sw,
-    // reg_file
-    output wire [2:0]  rf_rd_idx,
-    input  wire [3:0]  rf_rd_name_id,
-    input  wire [7:0]  rf_rd_price,
-    input  wire [3:0]  rf_rd_stock,
-    input  wire        rf_rd_enabled,
-    output wire        rf_sale_we,
-    output wire [2:0]  rf_sale_idx,
-    output wire [7:0]  rf_sale_amount,
-    output wire        rf_refund_we,
-    output wire [2:0]  rf_refund_idx,
-    output wire [7:0]  rf_refund_amount,
-    // 显示
-    output wire [2:0]  disp_sel_idx,
-    output wire [7:0]  disp_balance,
-    output wire [7:0]  disp_price,
-    output wire [3:0]  disp_countdown,
-    output wire [3:0]  disp_err_code,
-    output wire [2:0]  sales_state,
-    // LED
-    output wire [15:0] led_pattern,
-    output wire        led_breathing,
-    output wire        led_error_blink,
-    output wire        exit_req
-);
-```
-
-B 的子状态：`IDLE→SELECT→PAY→CONFIRM→DISPENSE→PICKUP_WAIT→DONE` 或 `→REFUND`。
-饮料编号 = `sw[3:1]`；金额 = `sw[7:0]`；取货超时 5 s（5×10^8 clk）；错误码 1~4。
-
-### 4.9 `admin_module` [A] — 接口已冻结，A 实现内部 FSM
-
-```verilog
-module admin_module (
-    input  wire        clk, rst,
-    input  wire        enable,         // = mode_admin
-    input  wire        ev_pulse,
-    input  wire [3:0]  ev_code,
-    input  wire [15:0] sw,
-    // reg_file
-    output reg  [2:0]  rf_rd_idx,
-    input  wire [3:0]  rf_rd_name_id,
-    input  wire [7:0]  rf_rd_price,
-    input  wire [3:0]  rf_rd_stock,
-    input  wire        rf_rd_enabled,
-    input  wire [15:0] rf_rd_total_revenue,
-    output reg         rf_admin_we_price,
-    output reg  [2:0]  rf_admin_price_idx,
-    output reg  [7:0]  rf_admin_price_val,
-    output reg         rf_admin_we_restock,
-    output reg  [2:0]  rf_admin_restock_idx,
-    output reg  [3:0]  rf_admin_restock_amt,
-    output reg         rf_admin_we_toggle,
-    output reg  [2:0]  rf_admin_toggle_idx,
-    // 显示
-    output reg  [2:0]  admin_subfn,
-    output reg  [2:0]  disp_admin_idx,
-    output reg  [7:0]  disp_admin_val,
-    output reg  [15:0] disp_total_revenue,
-    output reg  [3:0]  disp_admin_err,
-    output reg  [15:0] led_admin,
-    output reg         exit_req
-);
-```
-
-子功能由 `sw[14:12]` 选择：`000`查库存，`001`查价格，`010`查累计，`011`查停售，`100`改价，`101`补货，`110`切停售，`111`退出。
-
-### 4.10 `password_unit` [A] (Bonus)
-
-```verilog
-module password_unit #(parameter PWD_DEFAULT = 8'hB4)
-(
-    input  wire        clk, rst,
-    input  wire        enable,      // = mode_pwd
-    input  wire        ev_pulse,
-    input  wire [3:0]  ev_code,
-    input  wire [15:0] sw,          // sw[7:0] 为密码
-    output reg         pwd_ok,      // 单周期：正确
-    output reg         pwd_fail,    // 单周期：错误
-    output reg         pwd_fail3,   // 锁存：连续 3 次错误
-    output reg  [1:0]  fail_cnt,
-    output reg  [3:0]  disp_err_code
-);
-```
-
-### 4.11 `display_mux` [C]
-
-根据当前模式将语义数据组装为 8 位数码管的字符 ID 数组。
-
-```verilog
-module display_mux (
-    input  wire        clk, rst,
-    input  wire        mode_main, mode_sales, mode_pwd, mode_admin, mode_alarm,
-    input  wire        scroll_enable,
-    input  wire [2:0]  s_sel_idx,
-    input  wire [7:0]  s_balance, s_price,
-    input  wire [3:0]  s_countdown, s_err_code,
-    input  wire [2:0]  s_state,
-    input  wire [3:0]  rf_name_id,
-    input  wire [2:0]  a_subfn,
-    input  wire [2:0]  a_idx,
-    input  wire [7:0]  a_val,
-    input  wire [15:0] a_total,
-    input  wire [3:0]  a_err,
-    input  wire [1:0]  pwd_fail_cnt,
-    input  wire [7:0]  pwd_sw_echo,
-    input  wire [3:0]  pwd_err,
-    output reg  [4:0]  digit [0:7],  // digit[0]=最右位
-    output reg  [7:0]  dp_mask
-);
-```
-
-字符 ID：0~9=数字，10=H，11=E，12=L，13=O，14=P，15=S，16=n，17=r，18=t，19=A，20=b，21=c，22=d，23=F，24=U，25=`-`，26=空白。
-
-**各模式布局（位7为最左，位0为最右）：**
-
-| 模式 | 位7..0 |
-|------|--------|
-| 主菜单 | 滚动 `HELLO   ` / `  OPEN  ` |
-| 销售-SELECT | `[编号]``[N][A][M][E]``空``[P][r][价格]` |
-| 销售-PAY | `[b][A][L]``[余额十位][余额个位]``/``[价格十位][价格个位]` |
-| 销售-PICKUP | `[P][i][c][k]``空``空``空``[倒计时]` |
-| 销售-ERROR | `[E][-][错误码]``空``空``空``空``空` |
-| 密码 | `[P][S][错误次数]``空``[sw7~4]``[sw3~0]` |
-| 管理-查库存 | `[编号]``[N][A][M][E]``[S][t][库存]` |
-| 管理-查价格 | `[编号]``[N][A][M][E]``空``[价格][.][价格]` |
-| 管理-查累计 | `[t][o][t][A][L]``空``[金额高][金额低]` |
-| 报警 | `[A][L][A][r][M]``空``[次数]` |
-
-### 4.12 `seg7_driver` [C]
-
-EGO1 共阴极双组段线数码管驱动。
-
-```verilog
-module seg7_driver (
-    input  wire        clk, rst,
-    input  wire [4:0]  digit0, digit1, digit2, digit3,  // 右4位 digit[3:0]
-    input  wire [4:0]  digit4, digit5, digit6, digit7,  // 左4位 digit[7:4]
-    input  wire [7:0]  dp_mask,
-    output reg  [6:0]  SEG0,   // DN0 段线 {CG0..CA0}，高有效
-    output reg         DP0,
-    output reg  [6:0]  SEG1,   // DN1 段线 {CG1..CA1}，高有效
-    output reg         DP1,
-    output reg  [7:0]  AN      // 位选，高有效，AN[0]=最右位
-);
-```
-
-扫描频率：100 MHz / 100_000 = 1 kHz/位。扫描到位 0~3 时驱动 SEG0，SEG1=0；扫描到位 4~7 时驱动 SEG1，SEG0=0。
-
-**字符→7段编码（高有效，位序 [6:0]={G,F,E,D,C,B,A}）：**
-`0→0111111`，`1→0000110`，`2→1011011`，`3→1001111`，`4→1100110`，
-`5→1101101`，`6→1111101`，`7→0000111`，`8→1111111`，`9→1101111`，
-`H→1110110`，`E→1111001`，`L→0111000`，`O→0111111`，`P→1110011`，
-`S→1101101`，`n→1010100`，`r→1010000`，`t→1111000`，`A→1110111`，
-`b→1111100`，`c→1011000`，`d→1011110`，`F→1110001`，`U→0111110`，
-`-→1000000`，`空白→0000000`
-
-### 4.13 `led_driver` [C]
-
-```verilog
-module led_driver (
-    input  wire        clk, rst,
-    input  wire        mode_main, mode_sales, mode_pwd, mode_admin, mode_alarm,
-    input  wire [15:0] sales_led_pattern,
-    input  wire        sales_led_breathing,
-    input  wire        sales_led_error,
-    input  wire [15:0] admin_led_pattern,
-    input  wire [7:0]  pwd_sw_echo,   // 密码模式下显示当前输入
-    output reg  [15:0] led
-);
-```
-
-主菜单=跑马灯；销售=透传 pattern（叠加呼吸/报错效果）；密码=LED[7:0]显示 sw[7:0]；管理=透传；报警=全部 5 Hz 闪烁。
-
-### 4.14 `buzzer_driver` [C] (Bonus)
-
-```verilog
-module buzzer_driver (
-    input  wire clk, rst,
-    input  wire click_pulse,   // 每次有效按键触发，播放操作音
-    input  wire mode_alarm,    // 报警时持续播放
-    output wire AUD_PWM,       // T1，标准推挽 assign AUD_PWM = pwm_out
-    output wire AUD_SD         // M6，= 1'b1
-);
-```
-
-操作音：4 kHz，50 ms。报警音：1 kHz / 2 kHz 每 200 ms 交替。
-
-### 4.15 `vga_driver` [C] (Bonus)
-
-640×480@60 Hz，25 MHz 像素时钟（100 MHz/4）。三区文本布局：顶部模式名、中部商品列表、底部状态行。
-
-```verilog
-module vga_driver (
-    input  wire        clk_100m, rst,
-    input  wire        mode_main, mode_sales, mode_pwd, mode_admin, mode_alarm,
-    output reg  [2:0]  rf_rd_idx_vga,
-    input  wire [3:0]  rf_name_id,
-    input  wire [7:0]  rf_price,
-    input  wire [3:0]  rf_stock,
-    input  wire        rf_enabled,
-    input  wire [2:0]  sales_sel_idx,
-    input  wire [7:0]  sales_balance,
-    input  wire [15:0] admin_total_revenue,
-    output wire        VGA_HS, VGA_VS,
-    output wire [3:0]  VGA_R, VGA_G, VGA_B
-);
-```
+| 物理按键 | 端口 | MAIN_MENU | SALE_MODE | ADMIN_MODE |
+|---------|------|-----------|-----------|------------|
+| S2 (R15) | `btn[2]` | 确认进入模式 | confirm | confirm/save/解除报警 |
+| S0 (R11) | `btn[0]` | — | 加金额(pay) | 属性下翻(next_attr) |
+| S1 (R17) | `btn[1]` | — | 下一个饮料 | 饮料ID减(id_dec) |
+| S3 (V1)  | `btn[3]` | — | 取消订单 | 属性上翻/退出(prev_attr) |
+| S4 (U4)  | `btn[4]` | — | 上一个饮料 | 饮料ID加(id_inc) |
+| S6 (P15) | `rst_n` | 全局复位（低有效） | ← | ← |
 
 ---
 
-## 5. 成员 A / B 接口契约速查
+## 6. 数码管显示格式汇总
 
-**B (sales_module) 必须保证：**
-- `rf_sale_we` 在取货成功那周期拉高 1 周期，`rf_sale_amount = price`
-- `rf_refund_we` 在超时那周期拉高 1 周期（stock 归还，revenue 回滚）
-- `led_pattern` PAY 阶段=进度条，DISPENSE 阶段=变频流水灯
-- `exit_req` 在 `EV_UP` 时拉高 1 周期
-
-**A (admin_module + password_unit) 必须保证：**
-- 各写使能（`rf_admin_we_*`）仅在 `EV_CONFIRM` 确认时拉高 1 周期
-- `password_unit`：连续 3 次错给 `pwd_fail3` 锁存高
-- 修改实时生效（下一时钟边沿 sales 模块即可读到新值）
-
----
-
-## 6. 编译上板
-
-1. Vivado 新建工程，器件选 `xc7a35tcsg324-1`（速度等级 -1C）。
-2. 添加所有 `.v` 文件，顶层模块 `drink_vending_top`。
-3. 添加 `vending_ego1.xdc`。
-4. Synthesis → Implementation → Generate Bitstream → 通过 Type-C 烧录。
-
----
-
-*文档版本 v2.0 — EGO1 (XC7A35T-1CSG324C)*
+| 模式 | 典型显示 | 说明 |
+|------|---------|------|
+| 主菜单 | `r1-0S-1A` | SW[0]=0→销售(S)，SW[0]=1→管理(A) |
+| 销售-选择 | `COLA04S5` | 饮料名+价格+S+库存 |
+| 销售-支付 | `bAL04P04` | 已投金额+P+价格 |
+| 销售-取货 | `PUSH   5` | 倒计时 5 秒 |
+| 销售-完成 | `DONE    ` | 取货成功 |
+| 销售-退款 | `rEFU xx ` | 退款金额 |
+| 销售-错误 | `Err    x` | 错误码 1-5 |
+| 管理-密码 | `----C0dE` | 等待键盘输入密码 |
+| 管理-库存 | `00FFF005` | 饮料0，库存5 |
+| 管理-价格 | `00FFF104` | 饮料0，价格4 |
+| 管理-状态 | `00FFF201` | 饮料0，在售(1)/停售(0) |
+| 管理-营收 | `FFFF0014` | 累计实收0x0014=20 |
+| 管理-报警 | `AAAAAAAA` | 密码连续输错3次 |
