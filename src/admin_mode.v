@@ -72,17 +72,17 @@ module admin_mode(
     reg [1:0] attr_sel;         // 0:库存, 1:单价, 2:状态
     reg       show_total;       // 1则显示累计实收金额
 
-    // ─── 新增：库存与单价的十进制 BCD 拆解 ───
+    // 新增：库存与单价的十进制 BCD 拆解
     wire [3:0] stock_tens = (current_stock / 10) % 10;
     wire [3:0] stock_ones = current_stock % 10;
     wire [3:0] price_tens = (current_price / 10) % 10;
     wire [3:0] price_ones = current_price % 10;
 
-    // ─── 新增：键盘输入修改值的十进制拆解 ───
+    // 新增：键盘输入修改值的十进制拆解
     wire [3:0] kbd_tens  = (kbd_buffer / 10) % 10;
     wire [3:0] kbd_ones  = kbd_buffer % 10;
 
-    // ─── 新增：饮料缩写及字宽控制逻辑 ───
+    // 新增：饮料缩写及字宽控制逻辑
     reg [15:0] name_code; // 存储缩写的 4 个 Nibble
     reg        name_len;  // 0: 3位长 (TEA, H2O); 1: 4位长 (COLA, SODA)
     
@@ -96,9 +96,7 @@ module admin_mode(
         endcase
     end
 
-    // ============================================================
     // 第一段：状态转移时序逻辑
-    // ============================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) 
             state <= S_IDLE;
@@ -106,9 +104,7 @@ module admin_mode(
             state <= next_state;
     end
 
-    // ============================================================
     // 第二段：状态转移组合逻辑
-    // ============================================================
     always @(*) begin
         next_state = state;
         case (state)
@@ -147,9 +143,7 @@ module admin_mode(
         endcase
     end
 
-    // ============================================================
     // 第三段：数据计算与控制信号输出
-    // ============================================================
     
     // 3.1 键盘输入累加逻辑 (时序逻辑)
     always @(posedge clk or negedge rst_n) begin
@@ -226,11 +220,11 @@ module admin_mode(
                         end
                     end
                     
-                    // ID 快捷切换
+                    // ID 切换
                     if (btn_id_inc && !show_total && drink_id < 3) drink_id <= drink_id + 1;
                     if (btn_id_dec && !show_total && drink_id > 0) drink_id <= drink_id - 1;
 
-                    // ─── 核心修改：动态自适应生成 view_data 显示内容 ───
+                    // 修改：动态自适应生成 view_data 显示内容
                     if (show_total) begin
                         view_data <= {total_revenue, 16'hFFFF};
                     end else begin
