@@ -29,6 +29,7 @@ module admin_mode(
     input rst_n,
     input admin_en,             // SW[1]: 1则进入管理/密码模式
     input sw_modify,            // SW[2]: 1则进入修改模式
+    input [7:0] password_in,    // ── 接口更改：引入外部动态密码输入 ──
     
     // 键盘接口
     input [3:0] kbd_data,       // 0-9 数字
@@ -66,7 +67,6 @@ module admin_mode(
     localparam S_ALARM  = 3'd5; // 报警锁定
 
     reg [2:0] state, next_state;
-    
     // 内部寄存器
     reg [7:0] pwd_buffer;
     reg [7:0] kbd_buffer;
@@ -74,7 +74,9 @@ module admin_mode(
     reg [1:0] attr_sel;         // 0:库存, 1:单价, 2:状态
     reg       show_total;       // 1则显示累计实收金额
 
+    // ============================================================
     // 第一段：状态转移时序逻辑
+    // ============================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) 
             state <= S_IDLE;
@@ -82,7 +84,9 @@ module admin_mode(
             state <= next_state;
     end
 
+    // ============================================================
     // 第二段：状态转移组合逻辑
+    // ============================================================
     always @(*) begin
         next_state = state; // 默认维持当前状态
         case (state)
@@ -93,8 +97,9 @@ module admin_mode(
             S_AUTH: begin
                 if (!admin_en) next_state = S_IDLE;
                 else if (btn_confirm) begin
-                    if (pwd_buffer == 8'hA5) next_state = S_VIEW;
-                    else if (error_cnt >= 2) next_state = S_ALARM;
+                    // ── 逻辑更改：使用 password_in 代替硬编码 ──
+                    if (pwd_buffer == password_in) next_state = S_VIEW;
+                    else if (error_cnt >= 2'd2) next_state = S_ALARM;
                     else next_state = S_AUTH; // 留在原地等待重试
                 end
             end
@@ -121,8 +126,11 @@ module admin_mode(
         endcase
     end
 
+    // ============================================================
     // 第三段：数据计算与控制信号输出
-    // 键盘输入累加逻辑 (时序逻辑)
+    // ============================================================
+    
+    // 3.1 键盘输入累加逻辑 (时序逻辑)
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             pwd_buffer <= 8'h0;
@@ -136,7 +144,7 @@ module admin_mode(
         end
     end
 
-    // 导航、显示与控制逻辑 (时序逻辑)
+    // 3.2 导航、显示与控制逻辑 (时序逻辑)
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             drink_id <= 3'd0;
@@ -163,12 +171,13 @@ module admin_mode(
                 end
 
                 S_AUTH: begin
-                    view_data <= {16'hFFFF, 4'hC, 4'h0, 4'hD, 4'hE};  // 显示 "CODE" 
-                    if (btn_confirm && pwd_buffer != 8'hA5) error_cnt <= error_cnt + 1;
+                    view_data <= {16'hFFFF, 4'hC, 4'h0, 4'hD, 4'hE}; // 显示 "CODE" 
+                    // ── 逻辑更改：密码错误计数对比对象变更为 password_in ──
+                    if (btn_confirm && pwd_buffer != password_in) error_cnt <= error_cnt + 1;
                 end
 
                 S_ALARM: begin
-                    view_data <= 32'hAAAAAAAA; 
+                    view_data <= 32'hAAAAAAAA;
                     alarm_trigger <= 1'b1;
                     if (btn_confirm) exit_to_main <= 1'b1;
                 end
@@ -182,13 +191,27 @@ module admin_mode(
                             else show_total <= 1'b1;
                         end
                     end
-                    // 左翻页逻辑
+                    
+                    // 左翻页逻辑（已添加边界锁定）
                     if (btn_prev_attr) begin
-                        if (show_total) begin show_total <= 1'b0; drink_id <= 3; attr_sel <= 2; end
-                        else if (attr_sel > 0) attr_sel <= attr_sel - 1;
-                        else if (drink_id > 0) begin drink_id <= drink_id - 1; attr_sel <= 2; end
+                        if (show_total) begin 
+                            show_total <= 1'b0;
+                            drink_id <= 3; 
+                            attr_sel <= 2; 
+                        end
+                        // 当在第0个饮料的第0个属性时，按下按键3不执行任何动作
+                        else if (drink_id == 3'd0 && attr_sel == 2'd0) begin
+                            // 保持不变
+                        end
+                        else if (attr_sel > 0) 
+                            attr_sel <= attr_sel - 1;
+                        else if (drink_id > 0) begin 
+                            drink_id <= drink_id - 1; 
+                            attr_sel <= 2; 
+                        end
                     end
-                    // ID 切换
+                    
+                    // ID 切换逻辑
                     if (btn_id_inc && !show_total && drink_id < 3) drink_id <= drink_id + 1;
                     if (btn_id_dec && !show_total && drink_id > 0) drink_id <= drink_id - 1;
 
@@ -204,13 +227,15 @@ module admin_mode(
                 end
 
                 S_MODIFY: begin
-                    view_data <= {4'h0, drink_id, 16'hFFFF, kbd_buffer}; 
+                    // ── 显示对齐更改：修改界面的显示对齐校准 ──
+                    view_data <= {4'h0, {1'b0, drink_id}, 4'hF, 4'hF, 4'hF, 4'hF, kbd_buffer}; 
                     if (btn_confirm) begin
                         update_data <= kbd_buffer;
                         case (attr_sel)
                             2'd0: update_type_out <= 2'b10; // 补货
                             2'd1: update_type_out <= 2'b01; // 改价
                             2'd2: update_type_out <= 2'b11; // 停售切换
+                            default: update_type_out <= 2'b00;
                         endcase
                     end
                 end
@@ -218,7 +243,10 @@ module admin_mode(
                 S_SAVE: begin
                     write_en <= 1'b1;
                 end
+                
+                default: ;
             endcase
         end
     end
+
 endmodule
