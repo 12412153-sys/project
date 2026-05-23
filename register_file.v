@@ -17,7 +17,7 @@ module register_file (
 
     // admin_mode write port
     input  wire       admin_we,          // 1-cycle write pulse from admin_mode
-    input  wire [1:0] admin_upd_type,    // 01=set price, 10=add stock, 11=toggle enabled
+    input  wire [1:0] admin_upd_type,    // 01=set price, 10=set stock (exact, cap 9), 11=toggle enabled
     input  wire [7:0] admin_upd_data,    // new price or stock increment (BCD, lower nibble used)
     input  wire [1:0] admin_drink_id,    // target drink index (0-3)
 
@@ -66,11 +66,8 @@ module register_file (
                 2'b01: begin   // set price (BCD lower nibble)
                     r_price[admin_drink_id] <= {4'h0, admin_upd_data[3:0]};
                 end
-                2'b10: begin   // add stock (BCD lower nibble), capped at 9
-                    if (r_stock[admin_drink_id] + admin_upd_data[3:0] > 4'd9)
-                        r_stock[admin_drink_id] <= 4'd9;
-                    else
-                        r_stock[admin_drink_id] <= r_stock[admin_drink_id] + admin_upd_data[3:0];
+                2'b10: begin   // set stock to exact value (BCD lower nibble), capped at 9
+                    r_stock[admin_drink_id] <= (admin_upd_data[3:0] > 4'd9) ? 4'd9 : admin_upd_data[3:0];
                 end
                 2'b11: begin   // toggle enabled bit
                     r_enabled[admin_drink_id] <= ~r_enabled[admin_drink_id];
