@@ -159,7 +159,7 @@ module drink_vending_top (
         .btn_id_dec      (btn_d[1]),
         .current_stock   (admin_cur_stock),
         .current_price   (admin_cur_price),
-        .sold_out_mask   (sold_out_mask),
+        .sold_out_mask   (rf_enabled_mask),  // pass enabled_mask (1=on-sale) so display shows 1 for on-sale
         .total_revenue   (rf_total_revenue),
         .password_in     (rf_password),
         .view_data       (admin_view_data),

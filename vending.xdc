@@ -50,41 +50,48 @@ set_property IOSTANDARD LVCMOS33 [get_ports ps2_data]
 
 # ------------------------------------------------------------
 # 7-segment display  -- active-high, common-cathode
-# DN0 (right 4 digits): segment lines seg0[7:0] = {dp,g,f,e,d,c,b,a}
-# DN1 (left  4 digits): segment lines seg1[7:0] = {dp,g,f,e,d,c,b,a}
-# Position select (AN) active-high: an[0]=rightmost(BIT1) .. an[7]=leftmost(BIT8)
+#
+# Pin assignment is LEFT-RIGHT FLIPPED from the default EGO1 numbering:
+#   seg7_mux digit 7 (id7, leftmost char)  -> an[7] -> G2 (BIT1, phys-leftmost)
+#   seg7_mux digit 0 (id0, rightmost char) -> an[0] -> G6 (BIT8, phys-rightmost)
+#
+# Because an[0..3] now drive BIT8..BIT5 (DN1 hardware group) and
+#         an[4..7] now drive BIT4..BIT1 (DN0 hardware group),
+# seg0 (used by seg7_mux for digits 0-3) is wired to the DN1 pins and
+# seg1 (used by seg7_mux for digits 4-7) is wired to the DN0 pins.
 # ------------------------------------------------------------
-# seg0: DN0 segments
-set_property PACKAGE_PIN B4 [get_ports {seg0[0]}]
-set_property PACKAGE_PIN A4 [get_ports {seg0[1]}]
-set_property PACKAGE_PIN A3 [get_ports {seg0[2]}]
-set_property PACKAGE_PIN B1 [get_ports {seg0[3]}]
-set_property PACKAGE_PIN A1 [get_ports {seg0[4]}]
-set_property PACKAGE_PIN B3 [get_ports {seg0[5]}]
-set_property PACKAGE_PIN B2 [get_ports {seg0[6]}]
-set_property PACKAGE_PIN D5 [get_ports {seg0[7]}]
+
+# seg0: wired to DN1 segment lines (drives digits 0-3, phys-right half BIT8-BIT5)
+set_property PACKAGE_PIN D4 [get_ports {seg0[0]}]
+set_property PACKAGE_PIN E3 [get_ports {seg0[1]}]
+set_property PACKAGE_PIN D3 [get_ports {seg0[2]}]
+set_property PACKAGE_PIN F4 [get_ports {seg0[3]}]
+set_property PACKAGE_PIN F3 [get_ports {seg0[4]}]
+set_property PACKAGE_PIN E2 [get_ports {seg0[5]}]
+set_property PACKAGE_PIN D2 [get_ports {seg0[6]}]
+set_property PACKAGE_PIN H2 [get_ports {seg0[7]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {seg0[*]}]
 
-# seg1: DN1 segments
-set_property PACKAGE_PIN D4 [get_ports {seg1[0]}]
-set_property PACKAGE_PIN E3 [get_ports {seg1[1]}]
-set_property PACKAGE_PIN D3 [get_ports {seg1[2]}]
-set_property PACKAGE_PIN F4 [get_ports {seg1[3]}]
-set_property PACKAGE_PIN F3 [get_ports {seg1[4]}]
-set_property PACKAGE_PIN E2 [get_ports {seg1[5]}]
-set_property PACKAGE_PIN D2 [get_ports {seg1[6]}]
-set_property PACKAGE_PIN H2 [get_ports {seg1[7]}]
+# seg1: wired to DN0 segment lines (drives digits 4-7, phys-left half BIT4-BIT1)
+set_property PACKAGE_PIN B4 [get_ports {seg1[0]}]
+set_property PACKAGE_PIN A4 [get_ports {seg1[1]}]
+set_property PACKAGE_PIN A3 [get_ports {seg1[2]}]
+set_property PACKAGE_PIN B1 [get_ports {seg1[3]}]
+set_property PACKAGE_PIN A1 [get_ports {seg1[4]}]
+set_property PACKAGE_PIN B3 [get_ports {seg1[5]}]
+set_property PACKAGE_PIN B2 [get_ports {seg1[6]}]
+set_property PACKAGE_PIN D5 [get_ports {seg1[7]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {seg1[*]}]
 
-# Position select: BIT1(G2)=an[0] rightmost .. BIT8(G6)=an[7] leftmost
-set_property PACKAGE_PIN G2 [get_ports {an[0]}]
-set_property PACKAGE_PIN C2 [get_ports {an[1]}]
-set_property PACKAGE_PIN C1 [get_ports {an[2]}]
-set_property PACKAGE_PIN H1 [get_ports {an[3]}]
-set_property PACKAGE_PIN G1 [get_ports {an[4]}]
-set_property PACKAGE_PIN F1 [get_ports {an[5]}]
-set_property PACKAGE_PIN E1 [get_ports {an[6]}]
-set_property PACKAGE_PIN G6 [get_ports {an[7]}]
+# Position select (flipped): an[7]=G2(BIT1 phys-left) .. an[0]=G6(BIT8 phys-right)
+set_property PACKAGE_PIN G6 [get_ports {an[0]}]
+set_property PACKAGE_PIN E1 [get_ports {an[1]}]
+set_property PACKAGE_PIN F1 [get_ports {an[2]}]
+set_property PACKAGE_PIN G1 [get_ports {an[3]}]
+set_property PACKAGE_PIN H1 [get_ports {an[4]}]
+set_property PACKAGE_PIN C1 [get_ports {an[5]}]
+set_property PACKAGE_PIN C2 [get_ports {an[6]}]
+set_property PACKAGE_PIN G2 [get_ports {an[7]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {an[*]}]
 
 # ------------------------------------------------------------
