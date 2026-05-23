@@ -80,6 +80,11 @@ module admin_mode(
     wire [3:0] price_ones = current_price % 10;
     wire [3:0] kbd_tens   = (kbd_buffer / 10) % 10;
     wire [3:0] kbd_ones   = kbd_buffer % 10;
+    wire [3:0] rev_ten_thousands = (total_revenue / 10000) % 10;
+    wire [3:0] rev_thousands     = (total_revenue / 1000) % 10;
+    wire [3:0] rev_hundreds      = (total_revenue / 100) % 10;
+    wire [3:0] rev_tens          = (total_revenue / 10) % 10;
+    wire [3:0] rev_ones          = total_revenue % 10;
 
     // 根据 drink_id 计算对应的英文缩写 Nibble 编码
     reg [15:0] name_nibbles;
@@ -216,7 +221,7 @@ module admin_mode(
                     if (btn_id_dec && !show_total && drink_id > 0) drink_id <= drink_id - 1;
 
                     // 显示输出
-                    if (show_total) view_data <= {total_revenue, 16'hFFFF};
+                    if (show_total) view_data <= {rev_ten_thousands, rev_thousands, rev_hundreds, rev_tens, rev_ones, 12'hFFF};
                     else begin
                         case (attr_sel)
                             // 2'd0: 对应名字自适应对齐 + 十进制库存
