@@ -11,20 +11,24 @@ set_property IOSTANDARD LVCMOS33 [get_ports clk]
 create_clock -period 10.000 -name sys_clk [get_ports clk]
 
 # ------------------------------------------------------------
-# Global reset (CPU_RESETN, active-low, S6)
+# Global reset: handled by S5 (FPGA_PROG_B, dedicated config pin).
+# Pressing S5 clears FPGA configuration and reloads bitstream = power-on reset.
+# rst_n is tied to 1'b1 internally in drink_vending_top.v; no XDC pin needed.
 # ------------------------------------------------------------
-set_property PACKAGE_PIN P15 [get_ports rst_n]
-set_property IOSTANDARD LVCMOS33 [get_ports rst_n]
 
 # ------------------------------------------------------------
-# General-purpose buttons (active-high when pressed)
-# S0=R11  S1=R17  S2=R15  S3=V1  S4=U4
+# General-purpose buttons
+#   S0-S4 (R11/R17/R15/V1/U4): active-high when pressed
+#   S6 / P15 (FPGA_RESET button): active-LOW, used as soft-exit (btn[5])
+#     - pulled up on board (4.7K to VCC); pressing drives P15 LOW
+#     - drink_vending_top inverts btn[5] before debounce
 # ------------------------------------------------------------
 set_property PACKAGE_PIN R11 [get_ports {btn[0]}]
 set_property PACKAGE_PIN R17 [get_ports {btn[1]}]
 set_property PACKAGE_PIN R15 [get_ports {btn[2]}]
 set_property PACKAGE_PIN V1  [get_ports {btn[3]}]
 set_property PACKAGE_PIN U4  [get_ports {btn[4]}]
+set_property PACKAGE_PIN P15 [get_ports {btn[5]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {btn[*]}]
 
 # ------------------------------------------------------------
@@ -126,24 +130,26 @@ set_property IOSTANDARD LVCMOS33 [get_ports aud_pwm]
 set_property IOSTANDARD LVCMOS33 [get_ports aud_sd]
 
 # ------------------------------------------------------------
-# VGA (Bonus -- pins pre-assigned, leave unconnected if unused)
+# VGA output -- 640×480 @60 Hz, 4-bit per channel (12-bit colour)
+# Pixel clock 25 MHz generated internally by vga_display (100 MHz ÷ 4)
+# HS and VS are active-LOW (standard negative polarity).
 # ------------------------------------------------------------
-#set_property PACKAGE_PIN F5 [get_ports {VGA_R[0]}]
-#set_property PACKAGE_PIN C6 [get_ports {VGA_R[1]}]
-#set_property PACKAGE_PIN C5 [get_ports {VGA_R[2]}]
-#set_property PACKAGE_PIN B7 [get_ports {VGA_R[3]}]
-#set_property PACKAGE_PIN B6 [get_ports {VGA_G[0]}]
-#set_property PACKAGE_PIN A6 [get_ports {VGA_G[1]}]
-#set_property PACKAGE_PIN A5 [get_ports {VGA_G[2]}]
-#set_property PACKAGE_PIN D8 [get_ports {VGA_G[3]}]
-#set_property PACKAGE_PIN C7 [get_ports {VGA_B[0]}]
-#set_property PACKAGE_PIN E6 [get_ports {VGA_B[1]}]
-#set_property PACKAGE_PIN E5 [get_ports {VGA_B[2]}]
-#set_property PACKAGE_PIN E7 [get_ports {VGA_B[3]}]
-#set_property PACKAGE_PIN D7 [get_ports VGA_HS]
-#set_property PACKAGE_PIN C4 [get_ports VGA_VS]
-#set_property IOSTANDARD LVCMOS33 [get_ports {VGA_R[*]}]
-#set_property IOSTANDARD LVCMOS33 [get_ports {VGA_G[*]}]
-#set_property IOSTANDARD LVCMOS33 [get_ports {VGA_B[*]}]
-#set_property IOSTANDARD LVCMOS33 [get_ports VGA_HS]
-#set_property IOSTANDARD LVCMOS33 [get_ports VGA_VS]
+set_property PACKAGE_PIN F5 [get_ports {vga_r[0]}]
+set_property PACKAGE_PIN C6 [get_ports {vga_r[1]}]
+set_property PACKAGE_PIN C5 [get_ports {vga_r[2]}]
+set_property PACKAGE_PIN B7 [get_ports {vga_r[3]}]
+set_property PACKAGE_PIN B6 [get_ports {vga_g[0]}]
+set_property PACKAGE_PIN A6 [get_ports {vga_g[1]}]
+set_property PACKAGE_PIN A5 [get_ports {vga_g[2]}]
+set_property PACKAGE_PIN D8 [get_ports {vga_g[3]}]
+set_property PACKAGE_PIN C7 [get_ports {vga_b[0]}]
+set_property PACKAGE_PIN E6 [get_ports {vga_b[1]}]
+set_property PACKAGE_PIN E5 [get_ports {vga_b[2]}]
+set_property PACKAGE_PIN E7 [get_ports {vga_b[3]}]
+set_property PACKAGE_PIN D7 [get_ports vga_hs]
+set_property PACKAGE_PIN C4 [get_ports vga_vs]
+set_property IOSTANDARD LVCMOS33 [get_ports {vga_r[*]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {vga_g[*]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {vga_b[*]}]
+set_property IOSTANDARD LVCMOS33 [get_ports vga_hs]
+set_property IOSTANDARD LVCMOS33 [get_ports vga_vs]
