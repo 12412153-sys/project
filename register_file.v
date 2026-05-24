@@ -13,7 +13,6 @@
 
 module register_file (
     input  wire       clk,
-    input  wire       rst_n,
 
     // admin_mode write port
     input  wire       admin_we,          // 1-cycle write pulse from admin_mode
@@ -40,6 +39,18 @@ module register_file (
     reg [15:0] r_revenue;
     reg [7:0]  r_password;
 
+    // Startup defaults: loaded at FPGA configuration time (GSR) and simulation time-0.
+    // Pressing S5 (PROG_B) reprograms the FPGA, restoring these values.
+    initial begin
+        r_price[0]  = 8'd4;   r_stock[0] = 4'd5;   // COLA: ¥4, stock 5
+        r_price[1]  = 8'd5;   r_stock[1] = 4'd6;   // SODA: ¥5, stock 6
+        r_price[2]  = 8'd3;   r_stock[2] = 4'd8;   // TEA:  ¥3, stock 8
+        r_price[3]  = 8'd2;   r_stock[3] = 4'd9;   // H2O:  ¥2, stock 9
+        r_enabled   = 4'b1111;
+        r_revenue   = 16'd0;
+        r_password  = 8'h42;
+    end
+
     assign price0        = r_price[0];
     assign price1        = r_price[1];
     assign price2        = r_price[2];
@@ -52,16 +63,8 @@ module register_file (
     assign total_revenue = r_revenue;
     assign password      = r_password;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            r_price[0]  <= 8'd4;   r_stock[0] <= 4'd5;   // COLA: ¥4, stock 5
-            r_price[1]  <= 8'd5;   r_stock[1] <= 4'd6;   // SODA: ¥5, stock 6
-            r_price[2]  <= 8'd3;   r_stock[2] <= 4'd8;   // TEA:  ¥3, stock 8
-            r_price[3]  <= 8'd2;   r_stock[3] <= 4'd9;   // H2O:  ¥2, stock 9
-            r_enabled   <= 4'b1111;
-            r_revenue   <= 16'd0;
-            r_password  <= 8'h42;  // press "4" then "2" to authenticate
-        end else if (admin_we) begin
+    always @(posedge clk) begin
+        if (admin_we) begin
             case (admin_upd_type)
                 2'b01: begin   // set price (BCD lower nibble)
                     r_price[admin_drink_id] <= {4'h0, admin_upd_data[3:0]};
