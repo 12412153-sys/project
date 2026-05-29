@@ -87,15 +87,17 @@ module admin_mode(
     wire [3:0] rev_ones          = total_revenue % 10;
 
     // 根据 drink_id 计算对应的英文缩写 Nibble 编码
-    reg [15:0] name_nibbles;
+   reg [31:0] name_nibbles;
     reg        is_4_char; // 1: 4位长(COLA,SODA), 0: 3位长(TEA,H2O)
+
     always @(*) begin
         case (drink_id[1:0])
-            2'd0: begin name_nibbles = {4'hC, 4'h0, 4'hD, 4'hA}; is_4_char = 1'b1; end // COLA -> C0dA
-            2'd1: begin name_nibbles = {4'h5, 4'h0, 4'hD, 4'hA}; is_4_char = 1'b1; end // SODA -> 50dA
-            2'd2: begin name_nibbles = {4'h7, 4'hE, 4'hA, 4'hF}; is_4_char = 1'b0; end // TEA  -> tEA_
-            2'd3: begin name_nibbles = {4'hB, 4'h2, 4'h0, 4'hF}; is_4_char = 1'b0; end // H2O  -> b20_
-            default: begin name_nibbles = 16'hFFFF; is_4_char = 1'b0; end
+            2'd0: begin name_nibbles = {8'h43, 8'h4F, 8'h4C, 8'h41}; is_4_char = 1'b1; end // COLA
+            2'd1: begin name_nibbles = {8'h53, 8'h4F, 8'h44, 8'h41}; is_4_char = 1'b1; end // SODA
+            2'd2: begin name_nibbles = {8'h54, 8'h45, 8'h41, 8'h20}; is_4_char = 1'b0; end // TEA + 空格
+            2'd3: begin name_nibbles = {8'h48, 8'h32, 8'h4F, 8'h20}; is_4_char = 1'b0; end // H2O + 空格
+            // 修改了这里：确保位宽匹配，用 32 位全 0（或者用 4 个空格 32'h20202020）
+            default: begin name_nibbles = 32'h0; is_4_char = 1'b0; end 
         endcase
     end
 
