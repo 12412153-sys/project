@@ -1,74 +1,78 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 2026/04/26 21:04:41
-// Design Name: 
 // Module Name: admin_mode
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
+// Description:
+//   Admin-mode controller for the FPGA vending machine: 8-bit password
+//   verification, consecutive-error alarm, and data-update command dispatch.
+//   Supports 4 drinks: COLA, SODA, TEA, H2O.
+//
+//   view_data uses the 40-bit char-ID format (8 x 5-bit), identical to
+//   seg7_mux / sales_v3: {id7, id6, id5, id4, id3, id2, id1, id0},
+//   id7 = leftmost digit.
+//   (Old version used 32-bit nibble encoding that could not represent
+//    H/L/O/S/t, causing garbled COLA/H2O names -- now fixed.)
+//
+//   Char-ID encoding: 0-9=digits, 10=A 11=b 12=C 13=d 14=E 15=F
+//                     16=H 17=L 18=O 19=P 20=S 21=t 22=r 23=blank
+//                     24=- 25=U 26=n 27=I 28=Y
+//
+// Note: all btn inputs are already debounced and converted to single-cycle
+//       rising-edge pulses by the parent module.
 //////////////////////////////////////////////////////////////////////////////////
 
 module admin_mode #(
-    parameter [29:0] FAIL_HOLD = 30'd500_000_000 // 密码输错后锁定显示"FAIL"的时间（100MHz时钟下等于5秒）
+    // Number of clock cycles to display "FAIL" after a single wrong password
+    // (5 s at 100 MHz = 500_000_000). Override with a smaller value in simulation.
+    parameter [29:0] FAIL_HOLD = 30'd500_000_000
 )(
-    input clk, rst_n,
-    input admin_en,           // 管理员模式总开关（由拨码开关 SW[0] 控制）
-    input sw_modify,          // 修改模式开关（由拨码开关 SW[1] 控制）
+    input clk,
+    input rst_n,
+    input admin_en,             // asserted by top when SW[0]=1 (admin selected)
+    input sw_modify,            // SW[1]=1: enter modify sub-state
 
-    // PS/2 键盘输入
-    input [3:0] kbd_data,     // 键盘输入的数字 (0-9)
-    input kbd_valid,          // 键盘按下有效脉冲（高电平持续一个周期）
+    // PS/2 keyboard interface
+    input [3:0] kbd_data,       // decoded digit 0-9
+    input kbd_valid,            // one-cycle pulse when a digit key is pressed
 
-    // 按键输入（均已消抖且转换为单周期脉冲）
-    input btn_confirm,        // 确认 / 保存 / 解除报警
-    input btn_next_attr,      // 切换到下一个属性
-    input btn_prev_attr,      // 切换到上一个属性
-    input btn_id_inc,         // 增加饮品ID
-    input btn_id_dec,         // 减少饮品ID
+    // button inputs (debounced, single-cycle pulses)
+    input btn_confirm,          // confirm / save / dismiss alarm
+    input btn_next_attr,        // step forward through attributes
+    input btn_prev_attr,        // step backward through attributes
+    input btn_id_inc,           // increment drink ID
+    input btn_id_dec,           // decrement drink ID
 
-    // 来自寄存器堆（RegFile）的数据
-    input [7:0] current_stock,// 当前选定饮品的库存
-    input [7:0] current_price,// 当前选定饮品的价格
-    input [3:0] sold_out_mask,// 4种饮品的上架状态掩码（1为在售，0为下架）
-    input [15:0] total_revenue, // 累计总营业额
-    input [7:0] password_in,  // 正确的管理员密码（存储在系统寄存器中）
+    // register file data
+    input [7:0] current_stock,
+    input [7:0] current_price,
+    input [3:0] sold_out_mask,  // enabled_mask from top: bit=1 means on-sale
+    input [15:0] total_revenue,
+    input [7:0] password_in,    // correct password from register file
 
-    // 输出信号
-    output reg [39:0] view_data,    // 发送给数码管的40位数据（8个数码管 × 每管5位字符编码）
-    output reg write_en,            // 写寄存器使能（保存修改时拉高）
-    output reg [1:0] update_type_out,// 修改类型：01价格，10库存，11状态
-    output reg [7:0] update_data,   // 要修改的写入数据
-    output reg [2:0] drink_id,      // 当前选择的饮品ID (0=COLA, 1=SODA, 2=TEA, 3=H2O)
-    output reg alarm_trigger,       // 报警触发信号（连蜂鸣器）
-    output reg exit_to_main,        // 强行退出管理员模式返回主界面的信号
+    // outputs
+    output reg [39:0] view_data,    // 8 x 5-bit char-ID packed display word
+    output reg write_en,
+    output reg [1:0]  update_type_out,
+    output reg [7:0]  update_data,
+    output reg [2:0]  drink_id,
+    output reg alarm_trigger,
+    output reg exit_to_main,
 
-    // VGA 状态导出
-    output [1:0] attr_sel_out,    // 当前属性选择 (0:库存, 1:价格, 2:状态)
-    output       show_total_out,  // 是否在显示总营业额
-    output [2:0] state_out        // 当前 FSM 状态码
+    // state exports for VGA display
+    output [1:0] attr_sel_out,    // current attribute: 0=stock 1=price 2=status
+    output       show_total_out,  // 1: currently showing cumulative revenue
+    output [2:0] state_out        // current FSM state
 );
 
-    // 二进制状态定义
-    localparam S_IDLE  = 3'd0; // 空闲
-    localparam S_AUTH  = 3'd1; // 密码验证
-    localparam S_VIEW  = 3'd2; // 数据查看
-    localparam S_MODIFY = 3'd3;// 数据修改
-    localparam S_SAVE   = 3'd4;// 保存写入
-    localparam S_ALARM  = 3'd5;// 连续错3次，触发报警
-    localparam S_FAIL   = 3'd6;// 输错1-2次，短锁定
-    
-    // 字符编码映射表（5位编码对应数码管字形）
+    // FSM states
+    localparam S_IDLE   = 3'd0;
+    localparam S_AUTH   = 3'd1;
+    localparam S_VIEW   = 3'd2;
+    localparam S_MODIFY = 3'd3;
+    localparam S_SAVE   = 3'd4;
+    localparam S_ALARM  = 3'd5;
+    localparam S_FAIL   = 3'd6;   // single wrong password: show FAIL for FAIL_HOLD cycles, then return to S_AUTH
+
+    // char-ID constants (matching seg7_mux encoding)
     localparam [4:0] C_0=5'd0,  C_1=5'd1,  C_2=5'd2,  C_3=5'd3,  C_4=5'd4;
     localparam [4:0] C_5=5'd5,  C_6=5'd6,  C_7=5'd7,  C_8=5'd8,  C_9=5'd9;
     localparam [4:0] C_A=5'd10, C_b=5'd11, C_C=5'd12, C_d=5'd13, C_E=5'd14;
@@ -77,32 +81,80 @@ module admin_mode #(
     localparam [4:0] C_U=5'd25, C_n=5'd26, C_I=5'd27, C_Y=5'd28;
 
     reg [2:0] state, next_state;
-    reg [7:0] pwd_buffer;    // 存储用户当前输入的密码
-    reg [7:0] kbd_buffer;    // 存储修改数值时的十进制输入缓存
-    reg [1:0] error_cnt;     // 密码错误计数器
-    reg [1:0] attr_sel;      // 属性选择器 (0=库存, 1=价格, 2=状态)
-    reg       show_total;    // 营业额显示标志位
-    reg [29:0] fail_timer;   // 输错密码锁定计时器
-    wire fail_done = (fail_timer >= FAIL_HOLD - 1'b1); // 5秒倒计时结束信号
+    reg [7:0] pwd_buffer;
+    reg [7:0] kbd_buffer;
+    reg [1:0] error_cnt;
+    reg [1:0] attr_sel;         // 0=stock, 1=price, 2=on-sale status
+    reg       show_total;       // 1: show cumulative revenue instead of attribute
+    reg [29:0] fail_timer;      // hold-time counter for S_FAIL
+    wire fail_done = (fail_timer >= FAIL_HOLD - 1'b1);
 
     // state exports
     assign attr_sel_out   = attr_sel;
     assign show_total_out = show_total;
     assign state_out      = state;
 
-    // decimal digit extraction for 7-segment display
+    // decimal digit extraction for 7-segment display.
+    // stock/price/kbd are <=8-bit (cheap constant divides, fine on 100 MHz).
     wire [3:0] stock_tens = (current_stock / 10) % 10;
     wire [3:0] stock_ones = current_stock % 10;
     wire [3:0] price_ones = current_price % 10;
     wire [3:0] kbd_tens   = (kbd_buffer / 10) % 10;
     wire [3:0] kbd_ones   = kbd_buffer % 10;
-    wire [3:0] rev_ten_thousands = (total_revenue / 10000) % 10;
-    wire [3:0] rev_thousands     = (total_revenue / 1000) % 10;
-    wire [3:0] rev_hundreds      = (total_revenue / 100) % 10;
-    wire [3:0] rev_tens          = (total_revenue / 10) % 10;
-    wire [3:0] rev_ones          = total_revenue % 10;
 
-    // 将4位纯数字(0-9)转换成对应的5位动态数码管字符ID编码
+    // Revenue is 16-bit; dividing it into 5 decimal digits combinationally
+    // (the old "/10000" etc.) was a long path into view_data. Replace with a
+    // division-free comparison chain, pipelined over 2 clocks. total_revenue
+    // changes only on a sale, so the 2-cycle latency is invisible.
+    reg [3:0] rev_ten_thousands, rev_thousands, rev_hundreds, rev_tens, rev_ones;
+    reg [3:0] rv_d4, rv_d3;
+    reg [15:0] rv_rem;
+    always @(posedge clk) begin : REV_S1   // extract top two digits + remainder
+        reg [15:0] r; reg [3:0] d4, d3;
+        r = total_revenue; d4 = 0; d3 = 0;
+        if      (r>=16'd60000) begin d4=6; r=r-16'd60000; end
+        else if (r>=16'd50000) begin d4=5; r=r-16'd50000; end
+        else if (r>=16'd40000) begin d4=4; r=r-16'd40000; end
+        else if (r>=16'd30000) begin d4=3; r=r-16'd30000; end
+        else if (r>=16'd20000) begin d4=2; r=r-16'd20000; end
+        else if (r>=16'd10000) begin d4=1; r=r-16'd10000; end
+        if      (r>=16'd9000)  begin d3=9; r=r-16'd9000;  end
+        else if (r>=16'd8000)  begin d3=8; r=r-16'd8000;  end
+        else if (r>=16'd7000)  begin d3=7; r=r-16'd7000;  end
+        else if (r>=16'd6000)  begin d3=6; r=r-16'd6000;  end
+        else if (r>=16'd5000)  begin d3=5; r=r-16'd5000;  end
+        else if (r>=16'd4000)  begin d3=4; r=r-16'd4000;  end
+        else if (r>=16'd3000)  begin d3=3; r=r-16'd3000;  end
+        else if (r>=16'd2000)  begin d3=2; r=r-16'd2000;  end
+        else if (r>=16'd1000)  begin d3=1; r=r-16'd1000;  end
+        rv_d4 <= d4; rv_d3 <= d3; rv_rem <= r;
+    end
+    always @(posedge clk) begin : REV_S2   // extract lower three digits
+        reg [15:0] r; reg [3:0] d2, d1;
+        r = rv_rem; d2 = 0; d1 = 0;
+        if      (r>=16'd900) begin d2=9; r=r-16'd900; end
+        else if (r>=16'd800) begin d2=8; r=r-16'd800; end
+        else if (r>=16'd700) begin d2=7; r=r-16'd700; end
+        else if (r>=16'd600) begin d2=6; r=r-16'd600; end
+        else if (r>=16'd500) begin d2=5; r=r-16'd500; end
+        else if (r>=16'd400) begin d2=4; r=r-16'd400; end
+        else if (r>=16'd300) begin d2=3; r=r-16'd300; end
+        else if (r>=16'd200) begin d2=2; r=r-16'd200; end
+        else if (r>=16'd100) begin d2=1; r=r-16'd100; end
+        if      (r>=16'd90)  begin d1=9; r=r-16'd90;  end
+        else if (r>=16'd80)  begin d1=8; r=r-16'd80;  end
+        else if (r>=16'd70)  begin d1=7; r=r-16'd70;  end
+        else if (r>=16'd60)  begin d1=6; r=r-16'd60;  end
+        else if (r>=16'd50)  begin d1=5; r=r-16'd50;  end
+        else if (r>=16'd40)  begin d1=4; r=r-16'd40;  end
+        else if (r>=16'd30)  begin d1=3; r=r-16'd30;  end
+        else if (r>=16'd20)  begin d1=2; r=r-16'd20;  end
+        else if (r>=16'd10)  begin d1=1; r=r-16'd10;  end
+        rev_ten_thousands <= rv_d4; rev_thousands <= rv_d3;
+        rev_hundreds <= d2; rev_tens <= d1; rev_ones <= r[3:0];
+    end
+
+    // decimal digit -> char-ID
     function [4:0] num;
         input [3:0] x;
         begin
@@ -114,7 +166,7 @@ module admin_mode #(
         end
     endfunction
 
-    /// 把8个5位的字符打包拼接成一个40位的数码管总线
+    // pack eight 5-bit char-IDs into one 40-bit word
     function [39:0] pack8;
         input [4:0] d7,d6,d5,d4,d3,d2,d1,d0;
         begin
@@ -157,8 +209,8 @@ module admin_mode #(
                 if (!admin_en) next_state = S_IDLE;
                 else if (btn_confirm) begin
                     if (pwd_buffer == password_in) next_state = S_VIEW; // correct password
-                    else if (error_cnt >= 2'd2) next_state = S_ALARM;   // 3rd wrong attempt ： alarm
-                    else next_state = S_FAIL;                            // 1st/2nd wrong ： show FAIL 5 s
+                    else if (error_cnt >= 2'd2) next_state = S_ALARM;   // 3rd wrong attempt -> alarm
+                    else next_state = S_FAIL;                            // 1st/2nd wrong -> show FAIL 5 s
                 end
             end
             S_FAIL: begin
@@ -320,7 +372,7 @@ module admin_mode #(
                     view_data <= pack8(drink_num, name3, name2, name1, name0,
                                        C_BLK, num(kbd_tens), num(kbd_ones));
                     if (btn_confirm) begin
-                        update_data <= kbd_buffer;  // 当按下确认按键时，打包修改指令发送给寄存器堆（顶层总线）
+                        update_data <= kbd_buffer;
                         case (attr_sel)
                             2'd0: update_type_out <= 2'b10; // restock
                             2'd1: update_type_out <= 2'b01; // reprice
