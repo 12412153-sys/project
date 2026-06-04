@@ -73,13 +73,21 @@ module sales_v3 #(
     localparam ERR_LESS  = 4'd3;
     localparam ERR_PRICE = 4'd4;
     localparam ERR_TIME  = 4'd5;
+    localparam ERR_CODE  = 4'd6;   // invalid drink number (kbd 0 or 5-9)
 
     localparam [4:0] C_0=5'd0,  C_1=5'd1,  C_2=5'd2,  C_3=5'd3,  C_4=5'd4;
     localparam [4:0] C_5=5'd5,  C_6=5'd6,  C_7=5'd7,  C_8=5'd8,  C_9=5'd9;
     localparam [4:0] C_A=5'd10, C_b=5'd11, C_C=5'd12, C_d=5'd13, C_E=5'd14;
     localparam [4:0] C_F=5'd15, C_H=5'd16, C_L=5'd17, C_O=5'd18, C_P=5'd19;
-    localparam [4:0] C_S=5'd20, C_t=5'd21, C_r=5'd22, C_BLK=5'd23, C_U=5'd25;
-    localparam [4:0] C_n=5'd26, C_Y=5'd28;
+    localparam [4:0] C_S=5'd20, C_t=5'd21, C_r=5'd22, C_BLK=5'd23, C_dash=5'd24;
+    localparam [4:0] C_U=5'd25, C_n=5'd26, C_Y=5'd28;
+
+    // Pickup-wait countdown: WAIT_SECS seconds shown on the rightmost digit.
+    // SEC_TICK = cycles per displayed second (derived from TAKE_TIMEOUT so the
+    // countdown always sweeps WAIT_SECS..1 regardless of the timeout override).
+    localparam [3:0]  WAIT_SECS = 4'd5;
+    localparam [31:0] SEC_TICK  = (TAKE_TIMEOUT / WAIT_SECS == 0) ? 32'd1
+                                                                  : (TAKE_TIMEOUT / WAIT_SECS);
 
     reg [3:0]  state;
     reg [31:0] timer;
@@ -95,8 +103,49 @@ module sales_v3 #(
     reg [4:0]  name3, name2, name1, name0;
     reg [31:0] flow_limit;
 
-    wire [15:0] total_raw = cart0 * price0 + cart1 * price1 + cart2 * price2 + cart3 * price3;
-    wire [15:0] add_raw = total_raw + qty_input * current_price;
+    // ST_WAIT pickup countdown, kept as a registered second-counter instead of
+    // "timer / SEC_TICK" (a 32-bit constant division that lengthened timing).
+    reg [3:0]  take_sec;     // remaining seconds (WAIT_SECS .. 1)
+    reg [31:0] sec_acc;      // cycle accumulator within the current second
+
+    // Three-stage pipeline for the cart subtotal and "add to cart" check.
+    //
+    // The timing-critical path in the original code:
+    //   r_price_reg -> current_price mux -> multiply -> 4-way add -> compare
+    //   -> cart_reg/CE  (¡Ö14 ns, exceeds 10 ns budget)
+    //
+    // Fix: pre-register each individual product (Stage A), then sum them
+    // (Stage B), then add the pending qty¡Áprice (Stage C).  Each stage
+    // has only one multiply or one adder tree, well within 10 ns.
+    //
+    // The 3-cycle latency from cart/price registers to add_raw is
+    // imperceptible at human button-press timescales.
+    //
+    // Stage A: four independent 8¡Á8-bit multiplies, all in parallel.
+    //          Each has 10 ns to compute on its own.
+    reg [15:0] prod0, prod1, prod2, prod3;
+    always @(posedge clk) begin
+        prod0 <= cart0 * price0;
+        prod1 <= cart1 * price1;
+        prod2 <= cart2 * price2;
+        prod3 <= cart3 * price3;
+    end
+
+    // Stage B: sum the four registered products (adder tree, ~4 ns).
+    //          Also begin qty¡Áprice for the "add to cart" check.
+    reg [15:0] total_raw;
+    reg [15:0] qty_x_price;     // registered qty¡Ácurrent_price (8¡Á8)
+    always @(posedge clk) begin
+        total_raw   <= prod0 + prod1 + prod2 + prod3;
+        qty_x_price <= qty_input * current_price;  // current_price: fast mux of price regs
+    end
+
+    // Stage C: add pending qty¡Áprice to the cart total.
+    //          Also feeds the "order full?" check (add_raw > MAX_TOTAL).
+    reg [15:0] add_raw;
+    always @(posedge clk)
+        add_raw <= total_raw + qty_x_price;
+
     wire [11:0] paid_show = ((paid_sum + pay_entry) > MAX_TOTAL) ? MAX_TOTAL : (paid_sum + pay_entry);
 
     function [4:0] num;
@@ -137,19 +186,26 @@ module sales_v3 #(
         end
     endfunction
 
+    // Thermometer progress bar WITHOUT division (a variable divisor would
+    // synthesize to a ~20 ns divider and was the dominant timing violation).
+    // LED k lights iff paid*16 >= total*(k+1), i.e. iff at least (k+1)/16 paid.
     function [15:0] pay_bar;
         input [11:0] paid;
         input [15:0] total;
-        integer n;
+        reg [31:0] p16;
+        reg [15:0] r;
+        integer k;
         begin
             if (total == 0)
-                pay_bar = 16'h0000;
+                r = 16'h0000;
             else if (paid >= total)
-                pay_bar = 16'hffff;
+                r = 16'hffff;
             else begin
-                n = (paid * 16) / total;
-                pay_bar = (n == 0) ? 16'h0000 : (16'hffff >> (16 - n));
+                p16 = paid * 32'd16;
+                for (k = 0; k < 16; k = k + 1)
+                    r[k] = (p16 >= total * (k + 1));
             end
+            pay_bar = r;
         end
     endfunction
 
@@ -162,8 +218,12 @@ module sales_v3 #(
         endcase
 
         stock_left = (current_stock > current_cart) ? (current_stock - current_cart) : 8'd0;
-        total_amount = (total_raw > MAX_TOTAL) ? MAX_TOTAL : total_raw[11:0];
     end
+
+    // Register the cart total so the 4-way multiply (total_raw) is not in the
+    // combinational display -> 7-segment path. 1-cycle latency is invisible.
+    always @(posedge clk)
+        total_amount <= (total_raw > MAX_TOTAL) ? MAX_TOTAL : total_raw[11:0];
 
     always @(*) begin
         case (drink_id)
@@ -197,6 +257,8 @@ module sales_v3 #(
             timer <= 32'd0;
             led_timer <= 32'd0;
             led_pos <= 4'd0;
+            take_sec <= WAIT_SECS;
+            sec_acc <= 32'd0;
             error_code <= ERR_NONE;
             sale_we <= 1'b0;
             sale_idx <= 2'd0;
@@ -226,6 +288,16 @@ module sales_v3 #(
                         paid_sum <= 12'd0;
                         timer <= 32'd0;
                         error_code <= ERR_NONE;
+                        // Keyboard quick-jump: type drink number 1-4 to select that drink.
+                        // Out-of-range digits (0 or 5~9) raise an INVALID CODE error.
+                        if (kbd_valid) begin
+                            if (kbd_data >= 4'd1 && kbd_data <= 4'd4)
+                                drink_id <= kbd_data[1:0] - 1'b1;
+                            else begin
+                                error_code <= ERR_CODE;
+                                state <= ST_ERROR;
+                            end
+                        end
                         if (btn_next)
                             drink_id <= (drink_id == 2'd3) ? 2'd0 : drink_id + 1'b1;
                         else if (btn_prev)
@@ -236,7 +308,7 @@ module sales_v3 #(
                             state <= ST_PAY;
                         else if (btn_cancel) begin
                             cart0 <= 8'd0; cart1 <= 8'd0; cart2 <= 8'd0; cart3 <= 8'd0;
-                            exit_to_main <= 1'b1;
+                            // exit_to_main not asserted: S5/rst_n handle return to main menu
                         end
                     end
 
@@ -270,6 +342,7 @@ module sales_v3 #(
                             end else if (qty_input > stock_left) begin
                                 qty_input <= 8'd0;
                                 state <= ST_STOCK;
+                                error_code <= ERR_EMPTY;   // qty exceeds stock; VGA shows OUT OF STOCK
                                 timer <= 32'd0;
                             end else if (add_raw > MAX_TOTAL) begin
                                 qty_input <= 8'd0;
@@ -335,6 +408,8 @@ module sales_v3 #(
                                 timer <= 32'd0;
                                 led_timer <= 32'd0;
                                 led_pos <= 4'd0;
+                                take_sec <= WAIT_SECS;
+                                sec_acc <= 32'd0;
                             end else begin
                                 change_money <= paid_show - total_raw;
                                 refund_pulse <= 1'b1;
@@ -363,6 +438,8 @@ module sales_v3 #(
                             timer <= 32'd0;
                             led_timer <= 32'd0;
                             led_pos <= 4'd0;
+                            take_sec <= WAIT_SECS;
+                            sec_acc <= 32'd0;
                         end else begin
                             timer <= timer + 1'b1;
                         end
@@ -385,6 +462,13 @@ module sales_v3 #(
                             timer <= 32'd0;
                         end else begin
                             timer <= timer + 1'b1;
+                            // one-second countdown (replaces timer/SEC_TICK division)
+                            if (sec_acc >= SEC_TICK - 1) begin
+                                sec_acc <= 32'd0;
+                                if (take_sec > 4'd1) take_sec <= take_sec - 1'b1;
+                            end else begin
+                                sec_acc <= sec_acc + 1'b1;
+                            end
                             if (led_timer >= flow_limit) begin
                                 led_timer <= 32'd0;
                                 led_pos <= (led_pos == 4'd15) ? 4'd0 : led_pos + 1'b1;
@@ -439,9 +523,14 @@ module sales_v3 #(
         case (state)
             ST_SELECT: begin
                 led_out = 16'h0001 << drink_id;
-                view_data = pack8(name3,name2,name1,name0,num(current_price[3:0]),C_BLK,
-                                  num((stock_left > 8'd99) ? 4'd9 : stock_left / 10),
-                                  num((stock_left > 8'd99) ? 4'd9 : stock_left % 10));
+                // Sold-out drinks show "--" (no stock number); on-sale shows 2-digit stock.
+                if (!enabled_mask[drink_id])
+                    view_data = pack8(name3,name2,name1,name0,num(current_price[3:0]),C_BLK,
+                                      C_dash, C_dash);
+                else
+                    view_data = pack8(name3,name2,name1,name0,num(current_price[3:0]),C_BLK,
+                                      num((stock_left > 8'd99) ? 4'd9 : stock_left / 10),
+                                      num((stock_left > 8'd99) ? 4'd9 : stock_left % 10));
             end
             ST_CHECK: begin
                 view_data = pack8(C_BLK,C_C,C_H,C_E,C_C,C_BLK,C_BLK,C_BLK);
@@ -483,7 +572,8 @@ module sales_v3 #(
                 led_out = 16'h00ff;
             end
             ST_WAIT: begin
-                view_data = pack8(C_P,C_U,C_S,C_H,C_BLK,C_BLK,C_BLK,C_BLK);
+                // "PUSH" on the left, pickup countdown (seconds) on the rightmost digit.
+                view_data = pack8(C_P,C_U,C_S,C_H,C_BLK,C_BLK,C_BLK,num(take_sec));
                 led_out = 16'h0001 << led_pos;
             end
             ST_COMMIT: begin
