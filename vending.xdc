@@ -4,11 +4,33 @@
 # ============================================================
 
 # ------------------------------------------------------------
+# Configuration bank 0 voltage (required by DRC CFGBVS-1).
+# EGO1 bank 0 is powered at 3.3 V.
+# ------------------------------------------------------------
+set_property CFGBVS VCCO        [current_design]
+set_property CONFIG_VOLTAGE 3.3 [current_design]
+
+# ------------------------------------------------------------
 # System clock (100 MHz)
 # ------------------------------------------------------------
 set_property PACKAGE_PIN P17 [get_ports clk]
 set_property IOSTANDARD LVCMOS33 [get_ports clk]
 create_clock -period 10.000 -name sys_clk [get_ports clk]
+
+# ------------------------------------------------------------
+# Clock-domain crossing: the 100 MHz system clock (sys_clk) and the
+# 25.175 MHz VGA pixel clock (clk_out1_clk_wiz_0 from the MMCM) have no
+# common period (ratio 3.97), so Vivado would otherwise demand an
+# impossible ~0.035 ns setup window on every signal that crosses between
+# them. The VGA module only reads slow-changing control/data buses
+# (cart, price, stock, state, revenue ...) that change at human button-
+# press rates; a one-frame transitional value is invisible. Declare the
+# two domains asynchronous so these cross-domain paths are not timed.
+# (Paths WITHIN each clock domain are still fully timed as normal.)
+# ------------------------------------------------------------
+set_clock_groups -asynchronous \
+    -group [get_clocks sys_clk] \
+    -group [get_clocks clk_out1_clk_wiz_0]
 
 # ------------------------------------------------------------
 # Global reset: handled by S5 (FPGA_PROG_B, dedicated config pin).

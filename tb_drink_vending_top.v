@@ -74,7 +74,9 @@ module tb_drink_vending_top;
     // ----------------------------------------------------------------
     // DUT
     // ----------------------------------------------------------------
-    drink_vending_top u_dut (
+    // FAIL_HOLD shrunk to 200 cycles so the per-error "FAIL" display
+    // (5 s on hardware) is testable in simulation.
+    drink_vending_top #(.FAIL_HOLD(30'd200)) u_dut (
         .clk      (clk),
         .btn      (btn),
         .sw       (sw),
@@ -130,11 +132,23 @@ module tb_drink_vending_top;
     // ----------------------------------------------------------------
     // do_reset: simulate FPGA reprogram (S5/PROG_B) by force-driving
     //   the internal rst_n wire low for 10 cycles, then releasing.
-    //   On real hardware, pressing S5 reconfigures the FPGA (= power-on reset).
+    //   On real hardware, pressing S5 reconfigures the FPGA (= power-on
+    //   reset) which also RELOADS the register_file INIT defaults.
+    //   register_file has no rst_n (defaults come from an `initial`
+    //   block = FPGA INIT attributes), so we reload them here to model
+    //   the reprogram faithfully in simulation.
     // ----------------------------------------------------------------
     task do_reset;
         begin
             force u_dut.rst_n = 1'b0;
+            // Model FPGA reconfiguration: restore register_file power-on defaults
+            u_dut.u_rf.r_price[0]  = 8'd4;  u_dut.u_rf.r_stock[0] = 4'd5;
+            u_dut.u_rf.r_price[1]  = 8'd5;  u_dut.u_rf.r_stock[1] = 4'd6;
+            u_dut.u_rf.r_price[2]  = 8'd3;  u_dut.u_rf.r_stock[2] = 4'd8;
+            u_dut.u_rf.r_price[3]  = 8'd2;  u_dut.u_rf.r_stock[3] = 4'd9;
+            u_dut.u_rf.r_enabled   = 4'b1111;
+            u_dut.u_rf.r_revenue   = 16'd0;
+            u_dut.u_rf.r_password  = 8'h61;
             repeat(10) @(posedge clk);
             release u_dut.rst_n;
             repeat(5)  @(posedge clk);
@@ -225,7 +239,7 @@ module tb_drink_vending_top;
         check(u_dut.u_rf.r_stock[3]  == 4'd9,   "stock[3] = 9 (H2O)");
         check(u_dut.u_rf.r_enabled   == 4'hF,   "all drinks enabled");
         check(u_dut.u_rf.r_revenue   == 16'd0,  "revenue = 0");
-        check(u_dut.u_rf.r_password  == 8'h42,  "password = 0x42");
+        check(u_dut.u_rf.r_password  == 8'h61,  "password = 0x61");
 
         // ============================================================
         // GROUP 2 – Main-menu LED
@@ -507,7 +521,7 @@ module tb_drink_vending_top;
 
         // ============================================================
         // GROUP 10 – Admin: correct password -> S_VIEW
-        //   Default password = 0x42 ("4" then "2" on keyboard)
+        //   Default password = 0x61 ("6" then "1" on keyboard)
         // ============================================================
         $display("\n=== GROUP 10: Admin password auth -> S_VIEW ===");
         sw = 8'h01;  // SW[0]=1 -> admin
@@ -515,9 +529,9 @@ module tb_drink_vending_top;
         check(u_dut.sys_state     == 2'd2, "Entered ADMIN_MODE");
         check(u_dut.u_admin.state == 3'd1, "Admin in S_AUTH");
 
-        kbd_digit(4'd4); repeat(5) @(posedge clk);
-        kbd_digit(4'd2); repeat(5) @(posedge clk);
-        check(u_dut.u_admin.pwd_buffer == 8'h42, "pwd_buffer = 0x42");
+        kbd_digit(4'd6); repeat(5) @(posedge clk);
+        kbd_digit(4'd1); repeat(5) @(posedge clk);
+        check(u_dut.u_admin.pwd_buffer == 8'h61, "pwd_buffer = 0x61");
 
         press_btn(6'b000100);  // confirm
         check(u_dut.u_admin.state == 3'd2, "Correct password -> S_VIEW");
@@ -525,17 +539,18 @@ module tb_drink_vending_top;
         // ============================================================
         // GROUP 11 – Admin view-data content & navigation
         //   After rst_n: COLA stock=5. At drink0/attr0 (stock).
-        //   name_nibbles for COLA = {C,0,D,A} = {4'hC,4'h0,4'hD,4'hA}
-        //   view_data = {4'hC,4'h0,4'hD,4'hA, 4'hF,4'hF, tens(5)=0, ones(5)=5}
+        //   view_data is 40-bit char-ID format (8 x 5-bit):
+        //   COLA stock view = {num(1), C(12), O(18), L(17), A(10),
+        //                      blank(23), tens(5)=0, ones(5)=5}
         // ============================================================
         $display("\n=== GROUP 11: Admin view navigation ===");
         check(u_dut.u_admin.drink_id[1:0] == 2'd0, "drink_id = 0 at entry");
         check(u_dut.u_admin.attr_sel      == 2'd0, "attr_sel = 0 (stock)");
 
-        // COLA view_data[31:28] = 'C' (4'hC), [3:0] = ones digit of stock=5
-        check(u_dut.admin_view_data[31:28] == 4'hC, "view d7 = C (COLA initial)");
-        check(u_dut.admin_view_data[27:24] == 4'h0, "view d6 = 0 (COLA)");
-        check(u_dut.admin_view_data[3:0]   == 4'd5, "view d0 = stock ones = 5");
+        // COLA view_data[39:35] = drink number 1, [34:30] = 'C' (12), [4:0] = stock ones = 5
+        check(u_dut.admin_view_data[39:35] == 5'd1,  "view d7 = drink number 1 (COLA)");
+        check(u_dut.admin_view_data[34:30] == 5'd12, "view d6 = C (COLA name)");
+        check(u_dut.admin_view_data[4:0]   == 5'd5,  "view d0 = stock ones = 5");
 
         // btn_next_attr = S0 = btn[0]
         press_btn(6'b000001);
@@ -546,19 +561,19 @@ module tb_drink_vending_top;
         check(u_dut.u_admin.drink_id[1:0] == 2'd1, "Carried to drink1 (SODA)");
         check(u_dut.u_admin.attr_sel      == 2'd0, "attr_sel reset to 0");
 
-        // btn_id_inc = S4 = btn[4]; btn_id_dec = S1 = btn[1]
-        press_btn(6'b010000);
-        check(u_dut.u_admin.drink_id[1:0] == 2'd2, "id_inc -> drink2 (TEA)");
+        // After button swap: btn_id_inc = S1 = btn[1]; btn_id_dec = S4 = btn[4]
         press_btn(6'b000010);
-        check(u_dut.u_admin.drink_id[1:0] == 2'd1, "id_dec -> drink1 (SODA)");
+        check(u_dut.u_admin.drink_id[1:0] == 2'd2, "id_inc (S1) -> drink2 (TEA)");
+        press_btn(6'b010000);
+        check(u_dut.u_admin.drink_id[1:0] == 2'd1, "id_dec (S4) -> drink1 (SODA)");
 
         // Navigate to show_total: from drink1/attr0, advance 9 more times
         // drink1/attr0->1->2, drink2/attr0->1->2, drink3/attr0->1->2, then show_total
         repeat(9) press_btn(6'b000001);
         check(u_dut.u_admin.show_total == 1'b1, "show_total after full sweep");
-        // view_data[31:16] = total_revenue = 0 (after rst_n), [15:0] = 0xFFFF
-        check(u_dut.admin_view_data[31:16] == 16'd0,    "Revenue display = 0");
-        check(u_dut.admin_view_data[15:0]  == 16'hFFFF, "Revenue lower half = blank");
+        // Revenue view = {t(21), blank, blank, rev4..rev0}; revenue=0 -> 5 digits all 0
+        check(u_dut.admin_view_data[39:35] == 5'd21, "Revenue view: 't' marker at d7");
+        check(u_dut.admin_view_data[24:0]  == 25'd0, "Revenue digits = 0 (5 x '0')");
 
         // btn_prev_attr = S3 = btn[3]; from show_total -> drink3/attr2
         press_btn(6'b001000);
@@ -571,10 +586,10 @@ module tb_drink_vending_top;
         // ============================================================
         $display("\n=== GROUP 12: Admin modify price ===");
         // Navigate from drink3/attr2 to drink0/attr1 (price):
-        //   id_dec x3 -> drink0, attr stays 2; then btn_prev -> attr1
-        press_btn(6'b000010);  // drink3->drink2
-        press_btn(6'b000010);  // drink2->drink1
-        press_btn(6'b000010);  // drink1->drink0 (attr=2)
+        //   id_dec (S4=btn[4]) x3 -> drink0, attr stays 2; then btn_prev -> attr1
+        press_btn(6'b010000);  // drink3->drink2
+        press_btn(6'b010000);  // drink2->drink1
+        press_btn(6'b010000);  // drink1->drink0 (attr=2)
         press_btn(6'b001000);  // attr2->attr1 (price)
         check(u_dut.u_admin.drink_id[1:0] == 2'd0, "At drink0");
         check(u_dut.u_admin.attr_sel      == 2'd1, "At price attr");
@@ -588,10 +603,10 @@ module tb_drink_vending_top;
         check(u_dut.u_admin.kbd_buffer[3:0] == 4'd7, "kbd_buffer lower nibble = 7");
 
         press_btn(6'b000100);  // confirm -> S_SAVE -> S_VIEW
+        sw = 8'h01;             // disable modify so the FSM settles in S_VIEW
+        repeat(5) @(posedge clk);
         check(u_dut.u_admin.state   == 3'd2, "Back in S_VIEW after save");
         check(u_dut.u_rf.r_price[0] == 8'd7, "COLA price updated to 7");
-
-        sw = 8'h01;  // disable modify
 
         // ============================================================
         // GROUP 13 – Admin toggle enabled status
@@ -614,10 +629,11 @@ module tb_drink_vending_top;
         sw = 8'h01;
 
         // ============================================================
-        // GROUP 14 – Admin set stock: type "9" -> stock=9
-        //   admin_upd_type=2'b10: stock = lower nibble of kbd_buffer (capped at 9)
+        // GROUP 14 – Admin set stock to a TWO-DIGIT value: type "1","5" -> 15
+        //   Verifies: (a) decimal accumulation (NOT BCD 0x15=21, the old +6 bug)
+        //             (b) two-digit stock storage (no longer capped at 9)
         // ============================================================
-        $display("\n=== GROUP 14: Admin set stock ===");
+        $display("\n=== GROUP 14: Admin set two-digit stock (15) ===");
         // Go back to stock attr: status(2)->price(1)->stock(0)
         press_btn(6'b001000);  // attr2->attr1
         press_btn(6'b001000);  // attr1->attr0
@@ -625,13 +641,15 @@ module tb_drink_vending_top;
 
         sw = 8'h03;
         repeat(5) @(posedge clk);
-        kbd_digit(4'd9); repeat(5) @(posedge clk);
-        check(u_dut.u_admin.kbd_buffer[3:0] == 4'd9, "kbd_buffer = 9");
+        kbd_digit(4'd1); repeat(5) @(posedge clk);
+        kbd_digit(4'd5); repeat(5) @(posedge clk);
+        check(u_dut.u_admin.kbd_buffer == 8'd15, "kbd_buffer = 15 (decimal, not 0x15=21)");
 
         press_btn(6'b000100);  // confirm -> save
-        sw = 8'h01;
+        sw = 8'h01;             // disable modify so the FSM settles in S_VIEW
+        repeat(5) @(posedge clk);
         check(u_dut.u_admin.state   == 3'd2, "Back in S_VIEW after stock set");
-        check(u_dut.u_rf.r_stock[0] == 4'd9, "COLA stock SET to 9");
+        check(u_dut.u_rf.r_stock[0] == 8'd15, "COLA stock SET to 15 (two-digit)");
 
         // ============================================================
         // GROUP 15 – Admin: prev at first position -> no exit;
@@ -649,8 +667,8 @@ module tb_drink_vending_top;
         // S5 exits ADMIN_MODE -> MAIN_MENU; register data preserved
         press_btn(6'b100000);
         check(u_dut.sys_state        == 2'd0, "S5 -> MAIN_MENU from ADMIN_MODE");
-        check(u_dut.u_rf.r_price[0]  == 8'd7, "COLA price still 7 after S5 exit");
-        check(u_dut.u_rf.r_stock[0]  == 4'd9, "COLA stock still 9 after S5 exit");
+        check(u_dut.u_rf.r_price[0]  == 8'd7,  "COLA price still 7 after S5 exit");
+        check(u_dut.u_rf.r_stock[0]  == 8'd15, "COLA stock still 15 after S5 exit");
 
         // ============================================================
         // GROUP 16 – Admin: 3 wrong passwords -> S_ALARM -> dismiss
@@ -666,21 +684,26 @@ module tb_drink_vending_top;
         press_btn(6'b000100);  // enter ADMIN_MODE
         check(u_dut.u_admin.state == 3'd1, "Admin in S_AUTH");
 
-        // Wrong attempt 1: "11"
+        // Wrong attempt 1: "11" -> S_FAIL (shows FAIL ~5s) then back to S_AUTH
         kbd_digit(4'd1); repeat(5) @(posedge clk);
         kbd_digit(4'd1); repeat(5) @(posedge clk);
         press_btn(6'b000100);
-        check(u_dut.u_admin.state     == 3'd1, "S_AUTH after 1st wrong pw");
+        check(u_dut.u_admin.state     == 3'd6, "S_FAIL after 1st wrong pw (FAIL shown)");
         check(u_dut.u_admin.error_cnt == 2'd1, "error_cnt = 1");
+        check(u_dut.u_admin.alarm_trigger == 1'b0, "no buzzer during single-error FAIL");
+        repeat(220) @(posedge clk);  // FAIL_HOLD(200) elapses -> back to S_AUTH
+        check(u_dut.u_admin.state     == 3'd1, "S_AUTH after FAIL hold (attempt 1)");
 
-        // Wrong attempt 2: "11"
+        // Wrong attempt 2: "11" -> S_FAIL again
         kbd_digit(4'd1); repeat(5) @(posedge clk);
         kbd_digit(4'd1); repeat(5) @(posedge clk);
         press_btn(6'b000100);
-        check(u_dut.u_admin.state     == 3'd1, "S_AUTH after 2nd wrong pw");
+        check(u_dut.u_admin.state     == 3'd6, "S_FAIL after 2nd wrong pw");
         check(u_dut.u_admin.error_cnt == 2'd2, "error_cnt = 2");
+        repeat(220) @(posedge clk);  // back to S_AUTH
+        check(u_dut.u_admin.state     == 3'd1, "S_AUTH after FAIL hold (attempt 2)");
 
-        // Wrong attempt 3: error_cnt >= 2 -> S_ALARM
+        // Wrong attempt 3: error_cnt >= 2 -> S_ALARM (persistent, with buzzer)
         kbd_digit(4'd1); repeat(5) @(posedge clk);
         kbd_digit(4'd1); repeat(5) @(posedge clk);
         press_btn(6'b000100);
